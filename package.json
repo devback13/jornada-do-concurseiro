@@ -1,0 +1,28 @@
+{
+  "name": "jornada-do-concurseiro",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Gerencie seus concursos públicos: cadastro manual ou por IA (leitura de edital), monitoramento de páginas, provas, gabaritos e simulação de notas.",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "build": "vite build",
+    "start": "npm run build && node server/index.js",
+    "serve": "node server/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@google/genai": "^3.3.0",
+    "dotenv": "^18.0.10",
+    "express": "^5.3.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.7.0",
+    "lucide-react": "^1.72.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "vite": "^6.4.6"
+  }
+}
