@@ -35,10 +35,11 @@ function snapshot(page) {
 
 const IMPORTANT = /edital|retifica|prorroga|resultado|gabarito|convoca|local de prova|cart[ãa]o|homologa|inscri|isen[çc][ãa]o|recurso|cronograma|suspens|cancel|adiad|nomea/i;
 
-export async function checkConcurso(id, { manual = false } = {}) {
-  const c = db.getConcurso(id);
+export async function checkConcurso(userId, id, { manual = false } = {}) {
+  const c = await db.getConcurso(userId, id);
   if (!c) throw Object.assign(new Error('Concurso não encontrado.'), { status: 404 });
   if (!c.url) throw Object.assign(new Error('Este concurso não possui URL para monitorar.'), { status: 400 });
+  const ownerId = userId || c.userId;
 
   const prev = c.monitor || {};
   const mon = { ativo: prev.ativo !== false, ...prev, ultimaVerificacao: now() };
@@ -63,7 +64,7 @@ export async function checkConcurso(id, { manual = false } = {}) {
 
       if (adicionados.length || removidos.length || novosLinks.length) {
         const relevantes = [...novosLinks.map((l) => l.text), ...adicionados].filter((t) => IMPORTANT.test(t));
-        const ia = await summarizeChange({ orgao: c.orgao, added: adicionados.slice(0, 80), removed: removidos.slice(0, 40), newLinks: novosLinks.slice(0, 30) });
+        const ia = await summarizeChange({ orgao: c.orgao, added: adicionados.slice(0, 80), removed: removidos.slice(0, 40), newLinks: novosLinks.slice(0, 30), userId: ownerId });
         const partes = [];
         if (novosLinks.length) partes.push(`${novosLinks.length} novo(s) link(s)/documento(s)`);
         if (adicionados.length) partes.push(`${adicionados.length} trecho(s) adicionado(s)`);
@@ -84,7 +85,7 @@ export async function checkConcurso(id, { manual = false } = {}) {
         historico.unshift(entry);
         mon.ultimaAlteracao = now();
         mon.alteracoesNaoVistas = (prev.alteracoesNaoVistas || 0) + 1;
-        await db.addNotificacao({
+        await db.addNotificacao(ownerId, {
           concursoId: c.id,
           tipo: 'alteracao',
           prioridade: relevantes.length ? 'alta' : 'normal',
@@ -104,7 +105,7 @@ export async function checkConcurso(id, { manual = false } = {}) {
     mon.falhas = (prev.falhas || 0) + 1;
     historico.unshift({ data: now(), tipo: 'erro', resumo: `Falha ao acessar a página: ${err.message}` });
     if (mon.falhas === 2) {
-      await db.addNotificacao({
+      await db.addNotificacao(ownerId, {
         concursoId: c.id,
         tipo: 'erro',
         prioridade: 'normal',
@@ -114,13 +115,13 @@ export async function checkConcurso(id, { manual = false } = {}) {
     }
     resultado = { alterado: false, erro: err.message };
     if (manual) {
-      await db.updateConcurso(id, { monitor: { ...mon, historico: historico.slice(0, MAX_HIST) } });
+      await db.updateConcurso(ownerId, id, { monitor: { ...mon, historico: historico.slice(0, MAX_HIST) } });
       throw Object.assign(new Error(`Falha ao acessar a página: ${err.message}`), { status: 502 });
     }
   }
 
   mon.historico = historico.slice(0, MAX_HIST);
-  await db.updateConcurso(id, { monitor: mon });
+  await db.updateConcurso(ownerId, id, { monitor: mon });
   return resultado;
 }
 
@@ -134,14 +135,15 @@ const dayDiff = (iso) => {
   return Math.round((d - today) / 86400000);
 };
 
-export async function checkLembretes() {
-  for (const c of db.listConcursos()) {
-    if (c.arquivado) continue;
+export async function checkLembretes(userId = null) {
+  const list = userId ? await db.listConcursos(userId) : await db.listAllConcursosForMonitor();
+  for (const c of list) {
+    if (c.arquivado || !c.userId) continue;
     const enviados = new Set(c.lembretesEnviados || []);
     const novos = [];
     const add = async (key, titulo, mensagem) => {
       if (enviados.has(key)) return;
-      await db.addNotificacao({ concursoId: c.id, tipo: 'lembrete', prioridade: 'alta', titulo, mensagem });
+      await db.addNotificacao(c.userId, { concursoId: c.id, tipo: 'lembrete', prioridade: 'alta', titulo, mensagem });
       novos.push(key);
     };
     const fim = dayDiff(c.inscricaoFim);
@@ -152,20 +154,25 @@ export async function checkLembretes() {
     if (prova !== null && prova >= 0 && prova <= 7) {
       await add(`prova-${c.dataProva}`, `Prova se aproximando: ${c.sigla || c.orgao}`, prova === 0 ? 'A prova é hoje. Boa prova!' : `Faltam ${prova} dia(s) para a prova${c.turnoProva && c.turnoProva !== 'Não informado' ? ` (turno: ${c.turnoProva})` : ''}.`);
     }
-    if (novos.length) await db.updateConcurso(c.id, { lembretesEnviados: [...enviados, ...novos] });
+    if (novos.length) await db.updateConcurso(c.userId, c.id, { lembretesEnviados: [...enviados, ...novos] });
   }
 }
 
-export async function runAll(reason = 'agendado') {
+export async function runAll(reason = 'agendado', userId = null) {
   if (running) return { skipped: true };
   running = true;
   const started = Date.now();
   let verificados = 0; let alterados = 0; let erros = 0;
   try {
-    for (const c of db.listConcursos()) {
-      if (!c.url || c.arquivado || c.monitor?.ativo === false) continue;
+    const list = userId ? await db.listConcursos(userId) : await db.listAllConcursosForMonitor();
+    const touchedUsers = new Set();
+    if (userId) touchedUsers.add(userId);
+
+    for (const c of list) {
+      if (!c.url || c.arquivado || c.monitor?.ativo === false || !c.userId) continue;
+      touchedUsers.add(c.userId);
       try {
-        const r = await checkConcurso(c.id);
+        const r = await checkConcurso(c.userId, c.id);
         verificados++;
         if (r.alterado) alterados++;
         if (r.erro) erros++;
@@ -175,8 +182,10 @@ export async function runAll(reason = 'agendado') {
       }
       await new Promise((r) => setTimeout(r, 1500));
     }
-    await checkLembretes();
-    await db.updateSettings({ ultimaRodadaMonitor: now() });
+    await checkLembretes(userId);
+    for (const uid of touchedUsers) {
+      await db.updateSettings(uid, { ultimaRodadaMonitor: now() });
+    }
   } finally {
     running = false;
   }
@@ -187,7 +196,7 @@ export async function runAll(reason = 'agendado') {
 export function startScheduler() {
   const slotsRun = new Set();
   const tick = () => {
-    const horarios = db.getSettings().monitorHorarios?.length ? db.getSettings().monitorHorarios : DEFAULT_HORARIOS;
+    const horarios = DEFAULT_HORARIOS;
     const d = new Date();
     const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
     const key = `${d.toDateString()} ${hhmm}`;
@@ -198,14 +207,8 @@ export function startScheduler() {
   };
   setInterval(tick, 30 * 1000);
 
-  // Recupera verificações perdidas enquanto o servidor estava desligado (> 12h).
   setTimeout(() => {
-    const last = db.getSettings().ultimaRodadaMonitor;
-    if (!last || Date.now() - new Date(last).getTime() > 12 * 3600 * 1000) {
-      runAll('recuperação na inicialização').catch((e) => console.error('[monitor]', e));
-    } else {
-      checkLembretes().catch(() => {});
-    }
+    checkLembretes().catch(() => {});
   }, 10 * 1000);
 }
 

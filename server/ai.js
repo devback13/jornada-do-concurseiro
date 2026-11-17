@@ -25,24 +25,25 @@ const INLINE_LIMIT = 512 * 1024;
   } catch { /* fallback silencioso */ }
 })();
 
-export function getAiConfig() {
-  const s = db.getSettings();
+export async function getAiConfig(userId = null) {
+  const s = userId ? await db.getSettings(userId) : {};
   const apiKey = s.geminiApiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
-  return { apiKey, model: s.geminiModel || process.env.GEMINI_MODEL || DEFAULT_MODEL };
+  return { apiKey, model: s.geminiModel || process.env.GEMINI_MODEL || DEFAULT_MODEL, hasUserKey: Boolean(s.geminiApiKey) };
 }
 
-export function aiAvailable() {
-  return Boolean(getAiConfig().apiKey);
+export async function aiAvailable(userId = null) {
+  const cfg = await getAiConfig(userId);
+  return Boolean(cfg.apiKey);
 }
 
-function client() {
-  const { apiKey } = getAiConfig();
+async function client(userId = null) {
+  const { apiKey, model } = await getAiConfig(userId);
   if (!apiKey) {
     const err = new Error('Chave da API Gemini não configurada. Acesse Configurações para informá-la.');
     err.status = 400;
     throw err;
   }
-  return new GoogleGenAI({ apiKey, apiVersion: 'v1beta' });
+  return { ai: new GoogleGenAI({ apiKey, apiVersion: 'v1beta' }), model };
 }
 
 // ---------------------------------------------------------------------------
@@ -186,9 +187,8 @@ async function documentPart(ai, buffer, mimeType) {
  * Extrai dados do edital.
  * @param {{ fileBase64?: string, mimeType?: string, text?: string, url?: string }} input
  */
-export async function extractEdital(input) {
-  const ai = client();
-  const { model } = getAiConfig();
+export async function extractEdital(input, userId = null) {
+  const { ai, model } = await client(userId);
   const parts = [];
   const fontes = [];
 
@@ -278,11 +278,10 @@ export async function extractEdital(input) {
 }
 
 /** Gera um resumo curto (em linguagem natural) das alterações detectadas na página. */
-export async function summarizeChange({ orgao, added, removed, newLinks }) {
-  if (!aiAvailable()) return '';
+export async function summarizeChange({ orgao, added, removed, newLinks, userId = null }) {
+  if (!(await aiAvailable(userId))) return '';
   try {
-    const ai = client();
-    const { model } = getAiConfig();
+    const { ai, model } = await client(userId);
     const interaction = await ai.interactions.create({
       model,
       system_instruction: 'Você ajuda concurseiros a acompanhar páginas de concursos públicos. Responda em português, em no máximo 2 frases objetivas, destacando o que importa ao candidato (novos editais, retificações, prorrogações, resultados, locais de prova). Ignore mudanças irrelevantes de layout.',
@@ -296,9 +295,8 @@ export async function summarizeChange({ orgao, added, removed, newLinks }) {
   }
 }
 
-export async function testAi() {
-  const ai = client();
-  const { model } = getAiConfig();
+export async function testAi(userId = null) {
+  const { ai, model } = await client(userId);
   const r = await ai.interactions.create({ model, input: 'Responda apenas: OK', store: false });
   return { ok: true, model, reply: (r.output_text || '').trim() };
 }
@@ -343,15 +341,14 @@ async function imagePart(ai, buffer, mimeType) {
  * Extrai respostas de um gabarito oficial ou cartão-resposta do usuário (PDF, TXT ou imagem).
  * @param {{ fileBase64: string, mimeType?: string, fileName?: string, modo?: 'oficial'|'usuario', tipoQuestao?: 'multipla'|'certo_errado', numAlternativas?: number, totalQuestoes?: number, cargo?: string, nomeProva?: string }} input
  */
-export async function extractGabarito(input) {
+export async function extractGabarito(input, userId = null) {
   if (!input?.fileBase64) {
     const err = new Error('Envie um arquivo PDF, TXT ou imagem (JPG/PNG) do gabarito.');
     err.status = 400;
     throw err;
   }
 
-  const ai = client();
-  const { model } = getAiConfig();
+  const { ai, model } = await client(userId);
   const buffer = Buffer.from(input.fileBase64, 'base64');
   const rawMime = (input.mimeType || '').toLowerCase();
   const ext = (input.fileName || '').toLowerCase().split('.').pop();

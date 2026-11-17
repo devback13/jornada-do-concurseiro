@@ -26,7 +26,7 @@ const SORTS = [
 
 const far = (d) => (d === null || d < 0 ? Infinity : d);
 
-export default function Dashboard() {
+export default function Dashboard({ user }) {
   const [list, setList] = useState(null);
   const [q, setQ] = useState('');
   const [filter, setFilter] = useState(() => sessionStorage.getItem('jc-filter') || 'todos');
@@ -88,7 +88,7 @@ export default function Dashboard() {
     return (
       <section className="welcome">
         <div className="welcome-hero">
-          <span className="eyebrow">Bem-vindo(a) à sua jornada</span>
+          <span className="eyebrow">Olá, {user?.nome || 'Concurseiro(a)'} · Bem-vindo(a) à sua jornada</span>
           <h1>Todos os seus concursos, organizados em um só lugar.</h1>
           <p>Cadastre um certame enviando o edital — nossa IA identifica órgão, banca, datas, cargos, salários e a estrutura das provas. Depois é só acompanhar: monitoramos a página do concurso duas vezes por dia e avisamos você sobre qualquer novidade.</p>
           <div className="welcome-actions">

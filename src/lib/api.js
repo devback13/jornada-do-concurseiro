@@ -1,19 +1,60 @@
 // Cliente HTTP da API.
+const TOKEN_KEY = 'jc_token';
+
+export function getAuthToken() {
+  try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; }
+}
+
+export function setAuthToken(token) {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch { /* ignore */ }
+}
+
 async function request(method, url, body) {
+  const headers = {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const token = getAuthToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
   const res = await fetch(url, {
     method,
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+    credentials: 'include',
+    headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   if (res.status === 204) return null;
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = { error: text }; }
+  if (res.status === 401 && !url.startsWith('/api/auth/')) {
+    setAuthToken('');
+    window.dispatchEvent(new Event('jc:unauthorized'));
+  }
   if (!res.ok) throw new Error(data?.error || `Erro ${res.status}`);
   return data;
 }
 
 export const api = {
+  // Autenticação
+  me: () => request('GET', '/api/auth/me'),
+  login: async (payload) => {
+    const r = await request('POST', '/api/auth/login', payload);
+    if (r?.token) setAuthToken(r.token);
+    return r;
+  },
+  register: async (payload) => {
+    const r = await request('POST', '/api/auth/register', payload);
+    if (r?.token) setAuthToken(r.token);
+    return r;
+  },
+  logout: async () => {
+    setAuthToken('');
+    await request('POST', '/api/auth/logout');
+  },
+
+  // Concursos
   listConcursos: () => request('GET', '/api/concursos'),
   getConcurso: (id) => request('GET', `/api/concursos/${id}`),
   createConcurso: (data) => request('POST', '/api/concursos', data),

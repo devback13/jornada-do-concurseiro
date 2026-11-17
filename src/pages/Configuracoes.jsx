@@ -5,7 +5,7 @@ import { useConfig } from '../lib/configContext.js';
 import { fmtDateTime } from '../lib/format.js';
 import { Field, Spinner, useToast } from '../components/ui.jsx';
 
-export default function Configuracoes() {
+export default function Configuracoes({ user }) {
   const { config, reload } = useConfig();
   const toast = useToast();
   const [key, setKey] = useState('');
@@ -136,12 +136,15 @@ export default function Configuracoes() {
         <header>
           <span className="section-icon"><Database size={18} /></span>
           <div>
-            <h2>Seus dados</h2>
-            <p className="muted small">Tudo fica salvo localmente em <code>data/db.json</code>. Faça backups periódicos.</p>
+            <h2>Seus dados & Conta</h2>
+            <p className="muted small">
+              Conectado como <strong>{user?.nome} {user?.sobrenome}</strong> ({user?.email}) · Armazenamento: <strong>{config.bancoDados || 'Neon Postgres (Nuvem)'}</strong>.
+            </p>
           </div>
+          <span className="status-pill ok"><CheckCircle2 size={14} /> Isolamento ativo</span>
         </header>
         <div className="form-section-body row gap-sm wrap">
-          <a className="btn btn-outline" href="/api/backup" download><Download size={16} /> Exportar backup</a>
+          <a className="btn btn-outline" href="/api/backup" download><Download size={16} /> Exportar meus concursos (JSON)</a>
           <button className="btn btn-outline" onClick={() => fileRef.current?.click()} disabled={busy === 'imp'}><Upload size={16} /> Importar backup</button>
           <input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) importar(f); e.target.value = ''; }} />
         </div>

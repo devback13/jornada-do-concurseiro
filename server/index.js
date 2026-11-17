@@ -2,7 +2,17 @@ import 'dotenv/config';
 import path from 'node:path';
 import fs from 'node:fs';
 import express from 'express';
-import { db } from './db.js';
+import { db, isPostgresConfigured, ensureSchema } from './db.js';
+import {
+  validatePasswordStrength,
+  hashPassword,
+  verifyPassword,
+  signSessionToken,
+  verifySessionToken,
+  extractTokenFromReq,
+  setSessionCookie,
+  clearSessionCookie,
+} from './auth.js';
 import { extractEdital, extractGabarito, aiAvailable, getAiConfig, testAi, DEFAULT_MODEL } from './ai.js';
 import { checkConcurso, runAll, startScheduler, isRunning, DEFAULT_HORARIOS } from './monitor.js';
 
@@ -20,7 +30,104 @@ function publicConcurso(c, { full = false } = {}) {
   };
 }
 
+function publicUser(u) {
+  if (!u) return null;
+  return {
+    id: u.id,
+    nome: u.nome,
+    sobrenome: u.sobrenome || '',
+    email: u.email,
+    createdAt: u.createdAt,
+  };
+}
+
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+// Middleware de autenticação para rotas privadas
+const requireAuth = wrap(async (req, res, next) => {
+  const token = extractTokenFromReq(req);
+  const payload = verifySessionToken(token);
+  if (!payload) {
+    return res.status(401).json({ error: 'Sessão expirada ou não autenticada. Faça login para continuar.' });
+  }
+  const user = await db.getUserById(payload.sub);
+  if (!user) {
+    clearSessionCookie(res);
+    return res.status(401).json({ error: 'Usuário não encontrado. Faça login novamente.' });
+  }
+  req.user = user;
+  next();
+});
+
+// ----------------------------- Autenticação -----------------------------
+app.post('/api/auth/register', wrap(async (req, res) => {
+  const nome = String(req.body?.nome || '').trim();
+  const sobrenome = String(req.body?.sobrenome || '').trim();
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const password = String(req.body?.password || '');
+
+  if (!nome) throw Object.assign(new Error('Informe o seu nome.'), { status: 400 });
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw Object.assign(new Error('Informe um endereço de e-mail válido.'), { status: 400 });
+  }
+
+  const strength = validatePasswordStrength(password);
+  if (!strength.valid) {
+    throw Object.assign(new Error(strength.message), { status: 400 });
+  }
+
+  const existing = await db.getUserByEmail(email);
+  if (existing) {
+    throw Object.assign(new Error('Já existe uma conta cadastrada com este e-mail.'), { status: 409 });
+  }
+
+  const passwordHash = await hashPassword(password);
+  const user = await db.createUser({ nome, sobrenome, email, passwordHash });
+  const token = signSessionToken(user);
+  setSessionCookie(res, token);
+  res.status(201).json({ user: publicUser(user), token });
+}));
+
+app.post('/api/auth/login', wrap(async (req, res) => {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const password = String(req.body?.password || '');
+
+  if (!email || !password) {
+    throw Object.assign(new Error('Informe seu e-mail e senha.'), { status: 400 });
+  }
+
+  const user = await db.getUserByEmail(email);
+  if (!user || !(await verifyPassword(password, user.passwordHash))) {
+    throw Object.assign(new Error('E-mail ou senha inválidos.'), { status: 401 });
+  }
+
+  const token = signSessionToken(user);
+  setSessionCookie(res, token);
+  res.json({ user: publicUser(user), token });
+}));
+
+app.post('/api/auth/logout', (req, res) => {
+  clearSessionCookie(res);
+  res.status(204).end();
+});
+
+app.get('/api/auth/me', wrap(async (req, res) => {
+  const token = extractTokenFromReq(req);
+  const payload = verifySessionToken(token);
+  if (!payload) return res.json({ user: null });
+  const user = await db.getUserById(payload.sub);
+  if (!user) {
+    clearSessionCookie(res);
+    return res.json({ user: null });
+  }
+  res.json({ user: publicUser(user) });
+}));
+
+// Suporte a Vercel Cron Jobs (GET /api/monitor/executar) — executa sobre todos os usuários
+app.get('/api/monitor/executar', wrap(async (req, res) => {
+  if (isRunning()) return res.status(409).json({ error: 'Uma verificação já está em andamento.' });
+  res.json(await runAll('cron', null));
+}));
 
 // Campos que o cliente pode gravar em um concurso.
 const ALLOWED = [
@@ -37,117 +144,115 @@ function validate(data, partial = false) {
   }
 }
 
-// ----------------------------- Concursos -----------------------------
-app.get('/api/concursos', (req, res) => {
-  res.json(db.listConcursos().map((c) => publicConcurso(c)));
-});
-
-app.get('/api/concursos/:id', (req, res) => {
-  const c = db.getConcurso(req.params.id);
-  if (!c) return res.status(404).json({ error: 'Concurso não encontrado.' });
-  res.json(publicConcurso(c, { full: true }));
-});
-
-app.post('/api/concursos', wrap(async (req, res) => {
-  const data = pick(req.body);
-  validate(data);
-  const c = await db.createConcurso({ origem: 'manual', ...data, monitor: data.url ? { ativo: true } : undefined });
-  res.status(201).json(publicConcurso(c, { full: true }));
-  // Captura a versão inicial da página para comparações futuras.
-  if (c.url) checkConcurso(c.id).catch(() => {});
+// ----------------------------- Concursos (isolados por usuário) -----------------------------
+app.get('/api/concursos', requireAuth, wrap(async (req, res) => {
+  const list = await db.listConcursos(req.user.id);
+  res.json(list.map((c) => publicConcurso(c)));
 }));
 
-app.put('/api/concursos/:id', wrap(async (req, res) => {
-  const current = db.getConcurso(req.params.id);
+app.get('/api/concursos/:id', requireAuth, wrap(async (req, res) => {
+  const c = await db.getConcurso(req.user.id, req.params.id);
+  if (!c) return res.status(404).json({ error: 'Concurso não encontrado.' });
+  res.json(publicConcurso(c, { full: true }));
+}));
+
+app.post('/api/concursos', requireAuth, wrap(async (req, res) => {
+  const data = pick(req.body);
+  validate(data);
+  const c = await db.createConcurso(req.user.id, { origem: 'manual', ...data, monitor: data.url ? { ativo: true } : undefined });
+  res.status(201).json(publicConcurso(c, { full: true }));
+  if (c.url) checkConcurso(req.user.id, c.id).catch(() => {});
+}));
+
+app.put('/api/concursos/:id', requireAuth, wrap(async (req, res) => {
+  const current = await db.getConcurso(req.user.id, req.params.id);
   if (!current) return res.status(404).json({ error: 'Concurso não encontrado.' });
   const data = pick(req.body);
   validate({ ...current, ...data }, true);
   const urlChanged = 'url' in data && data.url !== current.url;
   if (urlChanged) data.monitor = data.url ? { ativo: true } : undefined;
-  const c = await db.updateConcurso(req.params.id, data);
+  const c = await db.updateConcurso(req.user.id, req.params.id, data);
   res.json(publicConcurso(c, { full: true }));
-  if (urlChanged && c.url) checkConcurso(c.id).catch(() => {});
+  if (urlChanged && c.url) checkConcurso(req.user.id, c.id).catch(() => {});
 }));
 
-app.delete('/api/concursos/:id', wrap(async (req, res) => {
-  const ok = await db.deleteConcurso(req.params.id);
+app.delete('/api/concursos/:id', requireAuth, wrap(async (req, res) => {
+  const ok = await db.deleteConcurso(req.user.id, req.params.id);
   res.status(ok ? 204 : 404).end();
 }));
 
 // ----------------------------- Monitoramento -----------------------------
-app.post('/api/concursos/:id/verificar', wrap(async (req, res) => {
-  const r = await checkConcurso(req.params.id, { manual: true });
-  res.json({ ...r, concurso: publicConcurso(db.getConcurso(req.params.id), { full: true }) });
+app.post('/api/concursos/:id/verificar', requireAuth, wrap(async (req, res) => {
+  const r = await checkConcurso(req.user.id, req.params.id, { manual: true });
+  const updated = await db.getConcurso(req.user.id, req.params.id);
+  res.json({ ...r, concurso: publicConcurso(updated, { full: true }) });
 }));
 
-app.put('/api/concursos/:id/monitor', wrap(async (req, res) => {
-  const c = db.getConcurso(req.params.id);
+app.put('/api/concursos/:id/monitor', requireAuth, wrap(async (req, res) => {
+  const c = await db.getConcurso(req.user.id, req.params.id);
   if (!c) return res.status(404).json({ error: 'Concurso não encontrado.' });
   const monitor = { ...(c.monitor || {}) };
   if (typeof req.body.ativo === 'boolean') monitor.ativo = req.body.ativo;
   if (req.body.marcarVisto) monitor.alteracoesNaoVistas = 0;
-  const updated = await db.updateConcurso(c.id, { monitor });
+  const updated = await db.updateConcurso(req.user.id, c.id, { monitor });
   res.json(publicConcurso(updated, { full: true }));
 }));
 
-app.post('/api/monitor/executar', wrap(async (req, res) => {
+app.post('/api/monitor/executar', requireAuth, wrap(async (req, res) => {
   if (isRunning()) return res.status(409).json({ error: 'Uma verificação já está em andamento.' });
-  res.json(await runAll('manual'));
-}));
-
-// Suporte a Vercel Cron Jobs (GET /api/monitor/executar)
-app.get('/api/monitor/executar', wrap(async (req, res) => {
-  if (isRunning()) return res.status(409).json({ error: 'Uma verificação já está em andamento.' });
-  res.json(await runAll('cron'));
+  res.json(await runAll('manual', req.user.id));
 }));
 
 // ----------------------------- Notificações -----------------------------
-app.get('/api/notificacoes', (req, res) => {
-  const list = db.listNotificacoes();
+app.get('/api/notificacoes', requireAuth, wrap(async (req, res) => {
+  const list = await db.listNotificacoes(req.user.id);
   res.json({ naoLidas: list.filter((n) => !n.lida).length, itens: list.slice(0, 100) });
-});
-app.post('/api/notificacoes/lidas', wrap(async (req, res) => {
-  await db.markNotificacoes(req.body?.ids || null, true);
+}));
+app.post('/api/notificacoes/lidas', requireAuth, wrap(async (req, res) => {
+  await db.markNotificacoes(req.user.id, req.body?.ids || null, true);
   res.status(204).end();
 }));
-app.delete('/api/notificacoes/:id', wrap(async (req, res) => {
-  await db.deleteNotificacao(req.params.id);
+app.delete('/api/notificacoes/:id', requireAuth, wrap(async (req, res) => {
+  await db.deleteNotificacao(req.user.id, req.params.id);
   res.status(204).end();
 }));
 
 // ----------------------------- IA -----------------------------
-app.post('/api/ia/extrair', wrap(async (req, res) => {
+app.post('/api/ia/extrair', requireAuth, wrap(async (req, res) => {
   const { fileBase64, mimeType, text, url } = req.body || {};
-  res.json(await extractEdital({ fileBase64, mimeType, text, url: url?.trim() || undefined }));
+  res.json(await extractEdital({ fileBase64, mimeType, text, url: url?.trim() || undefined }, req.user.id));
 }));
 
-app.post('/api/ia/extrair-gabarito', wrap(async (req, res) => {
-  res.json(await extractGabarito(req.body || {}));
+app.post('/api/ia/extrair-gabarito', requireAuth, wrap(async (req, res) => {
+  res.json(await extractGabarito(req.body || {}, req.user.id));
 }));
 
-app.post('/api/ia/testar', wrap(async (req, res) => {
-  res.json(await testAi());
+app.post('/api/ia/testar', requireAuth, wrap(async (req, res) => {
+  res.json(await testAi(req.user.id));
 }));
 
 // ----------------------------- Configurações -----------------------------
-function publicSettings() {
-  const s = db.getSettings();
-  const { apiKey, model } = getAiConfig();
+async function publicSettings(userId) {
+  const s = await db.getSettings(userId);
+  const { apiKey, model, hasUserKey } = await getAiConfig(userId);
   return {
-    iaDisponivel: aiAvailable(),
-    chaveOrigem: s.geminiApiKey ? 'app' : apiKey ? 'env' : null,
+    iaDisponivel: Boolean(apiKey),
+    chaveOrigem: hasUserKey ? 'app' : apiKey ? 'env' : null,
     chaveMascarada: apiKey ? `${apiKey.slice(0, 4)}…${apiKey.slice(-4)}` : '',
     geminiModel: model,
     modeloPadrao: DEFAULT_MODEL,
     monitorHorarios: s.monitorHorarios?.length ? s.monitorHorarios : DEFAULT_HORARIOS,
     ultimaRodadaMonitor: s.ultimaRodadaMonitor || null,
     monitorExecutando: isRunning(),
+    bancoDados: isPostgresConfigured() ? 'Neon Postgres (Nuvem)' : 'Arquivo JSON Local',
   };
 }
 
-app.get('/api/config', (req, res) => res.json(publicSettings()));
+app.get('/api/config', requireAuth, wrap(async (req, res) => {
+  res.json(await publicSettings(req.user.id));
+}));
 
-app.put('/api/config', wrap(async (req, res) => {
+app.put('/api/config', requireAuth, wrap(async (req, res) => {
   const patch = {};
   const b = req.body || {};
   if (typeof b.geminiApiKey === 'string') patch.geminiApiKey = b.geminiApiKey.trim();
@@ -157,23 +262,24 @@ app.put('/api/config', wrap(async (req, res) => {
     if (!valid.length) throw Object.assign(new Error('Informe ao menos um horário válido (HH:MM).'), { status: 400 });
     patch.monitorHorarios = valid;
   }
-  await db.updateSettings(patch);
-  res.json(publicSettings());
+  await db.updateSettings(req.user.id, patch);
+  res.json(await publicSettings(req.user.id));
 }));
 
 // ----------------------------- Backup -----------------------------
-app.get('/api/backup', (req, res) => {
+app.get('/api/backup', requireAuth, wrap(async (req, res) => {
+  const list = await db.listConcursos(req.user.id);
   res.setHeader('Content-Disposition', `attachment; filename="jornada-concurseiro-${new Date().toISOString().slice(0, 10)}.json"`);
-  res.json({ versao: 1, exportadoEm: new Date().toISOString(), concursos: db.listConcursos().map((c) => publicConcurso(c, { full: true })) });
-});
+  res.json({ versao: 1, exportadoEm: new Date().toISOString(), concursos: list.map((c) => publicConcurso(c, { full: true })) });
+}));
 
-app.post('/api/backup', wrap(async (req, res) => {
+app.post('/api/backup', requireAuth, wrap(async (req, res) => {
   const list = Array.isArray(req.body?.concursos) ? req.body.concursos : null;
   if (!list) throw Object.assign(new Error('Arquivo de backup inválido.'), { status: 400 });
   let n = 0;
   for (const c of list) {
     if (!c?.orgao) continue;
-    await db.createConcurso({ ...pick(c), monitor: c.url ? { ativo: true } : undefined });
+    await db.createConcurso(req.user.id, { ...pick(c), monitor: c.url ? { ativo: true } : undefined });
     n++;
   }
   res.json({ importados: n });
@@ -205,12 +311,14 @@ app.use((err, req, res, next) => {
 
 // Em ambiente serverless (Vercel), exporta o app; localmente, inicia o servidor HTTP.
 if (!process.env.VERCEL) {
-  const server = app.listen(PORT, () => {
+  const server = app.listen(PORT, async () => {
+    if (isPostgresConfigured()) {
+      await ensureSchema().catch((e) => console.error('[db] Erro ao inicializar tabelas no Neon Postgres:', e.message));
+    }
     console.log(`\n  🎯 Jornada do Concurseiro — API em http://localhost:${PORT}`);
-    console.log(`  IA: ${aiAvailable() ? `ativa (${getAiConfig().model})` : 'chave não configurada (defina GEMINI_API_KEY ou use Configurações)'}`);
+    console.log(`  Banco de dados: ${isPostgresConfigured() ? 'Neon Postgres (conectado)' : 'Arquivo JSON local'}`);
     startScheduler();
   });
-  // Permite até 15 minutos para leitura de editais extensos pela IA
   server.requestTimeout = 15 * 60 * 1000;
   server.headersTimeout = 15 * 60 * 1000 + 5000;
   server.timeout = 15 * 60 * 1000;
