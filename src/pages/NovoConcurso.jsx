@@ -51,12 +51,17 @@ function AIImport({ onResult }) {
     if (url.trim()) { try { new URL(url.trim()); } catch { return setError('Informe uma URL completa, começando com https://'); } }
     setLoading(true);
     try {
-      const payload = { url: url.trim() || undefined, text: text.trim() || undefined };
-      if (file) {
-        payload.fileBase64 = await fileToBase64(file);
-        payload.mimeType = file.type || (file.name.endsWith('.pdf') ? 'application/pdf' : 'text/plain');
+      let r;
+      if (file && !text.trim()) {
+        r = await api.extrairArquivo(file, url.trim());
+      } else {
+        const payload = { url: url.trim() || undefined, text: text.trim() || undefined };
+        if (file) {
+          payload.fileBase64 = await fileToBase64(file);
+          payload.mimeType = file.type || (file.name.endsWith('.pdf') ? 'application/pdf' : 'text/plain');
+        }
+        r = await api.extrair(payload);
       }
-      const r = await api.extrair(payload);
       onResult(r);
     } catch (e) {
       setError(e.message);

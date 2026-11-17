@@ -8,18 +8,19 @@ export const DEFAULT_MODEL = 'gemini-3.8-flash';
 // em vez de base64 inline para evitar payloads gigantes e quedas de conexão (fetch failed).
 const INLINE_LIMIT = 512 * 1024;
 
-// Desativa os timeouts padrão de 300s do Undici no Node.js.
-// Nota: `new Request(url, { dispatcher })` no Node descarta `dispatcher`, então configuramos o Agent global.
+// Desativa os timeouts padrão de 300s do Undici no Node.js local.
+// Na Vercel não substituímos o dispatcher global para preservar a infraestrutura de rede serverless.
 (function configureGlobalUndici() {
+  if (process.env.VERCEL) return;
   try {
     const sym = Symbol.for('undici.globalDispatcher.1');
     if (!globalThis[sym] && typeof Request !== 'undefined') new Request('https://localhost');
     const current = globalThis[sym];
-    if (current?.constructor) {
+    if (current?.constructor?.name === 'Agent') {
       globalThis[sym] = new current.constructor({
         headersTimeout: 0,
         bodyTimeout: 0,
-        connectTimeout: 60_000,
+        connect: { timeout: 60_000 },
       });
     }
   } catch { /* fallback silencioso */ }
@@ -158,12 +159,31 @@ Regras:
 
 async function waitActive(ai, file) {
   let f = file;
-  for (let i = 0; i < 30 && f.state && f.state !== 'ACTIVE'; i++) {
+  for (let i = 0; i < 20 && f.state && f.state !== 'ACTIVE'; i++) {
     if (f.state === 'FAILED') throw new Error('Falha ao processar o arquivo na API Gemini.');
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 1000));
     f = await ai.files.get({ name: f.name });
   }
   return f;
+}
+
+function parseJsonResult(raw, fallbackMsg = 'A IA não retornou um JSON válido. Tente novamente.') {
+  let data;
+  try {
+    data = JSON.parse(raw || '');
+  } catch {
+    const match = String(raw || '').match(/\{[\s\S]*\}/);
+    if (!match) throw new Error(fallbackMsg);
+    data = JSON.parse(match[0]);
+  }
+  return data;
+}
+
+function finalizeEditalData(interaction, { url = '', fontes = [], model = DEFAULT_MODEL } = {}) {
+  const data = parseJsonResult(interaction.output_text);
+  if (!data.url && url && fontes.includes('pagina')) data.url = url;
+  if (!data.editalUrl && url && fontes.includes('pdf-url')) data.editalUrl = url;
+  return { status: 'completed', data, fontes, model: interaction.model || model };
 }
 
 async function documentPart(ai, buffer, mimeType) {
@@ -177,23 +197,25 @@ async function documentPart(ai, buffer, mimeType) {
     }));
     return { type: 'document', uri: uploaded.uri, mime_type: uploaded.mimeType || mimeType };
   } catch (err) {
-    // Fallback para envio inline caso a Files API não esteja disponível para a chave configurada
+    if (buffer.length > 10 * 1024 * 1024) {
+      throw new Error(`Falha ao enviar o PDF para a API Gemini (${err.message}).`);
+    }
     console.warn('[ai] Upload via Files API falhou, usando envio inline:', err.message);
     return { type: 'document', data: buffer.toString('base64'), mime_type: mimeType };
   }
 }
 
 /**
- * Extrai dados do edital.
- * @param {{ fileBase64?: string, mimeType?: string, text?: string, url?: string }} input
+ * Inicia a extração do edital (em background quando suportado, evitando timeouts serverless).
+ * @param {{ fileBuffer?: Buffer, fileBase64?: string, mimeType?: string, text?: string, url?: string }} input
  */
 export async function extractEdital(input, userId = null) {
   const { ai, model } = await client(userId);
   const parts = [];
   const fontes = [];
 
-  if (input.fileBase64) {
-    const buffer = Buffer.from(input.fileBase64, 'base64');
+  if (input.fileBuffer || input.fileBase64) {
+    const buffer = input.fileBuffer || Buffer.from(input.fileBase64, 'base64');
     const mime = input.mimeType || 'application/pdf';
     if (mime === 'application/pdf') parts.push(await documentPart(ai, buffer, mime));
     else parts.push({ type: 'text', text: `Conteúdo do arquivo enviado:\n${buffer.toString('utf8').slice(0, 400_000)}` });
@@ -209,8 +231,7 @@ export async function extractEdital(input, userId = null) {
       const text = htmlToText(page.body);
       parts.push({ type: 'text', text: `Página do concurso (${input.url}):\n${text.slice(0, 200_000)}` });
       fontes.push('pagina');
-      // Se não veio arquivo, tenta localizar e ler o edital em PDF linkado na página.
-      if (!input.fileBase64) {
+      if (!input.fileBuffer && !input.fileBase64) {
         const links = extractLinks(page.body, page.finalUrl);
         const edital = links.find((l) => /\.pdf(\?|$)/i.test(l.href) && /edital|abertura/i.test(`${l.text} ${l.href}`) && !/retifica/i.test(`${l.text} ${l.href}`))
           || links.find((l) => /\.pdf(\?|$)/i.test(l.href) && /edital/i.test(`${l.text} ${l.href}`));
@@ -240,41 +261,62 @@ export async function extractEdital(input, userId = null) {
 
   parts.push({ type: 'text', text: `Extraia as informações do concurso conforme o esquema.${input.url ? ` URL informada pelo usuário: ${input.url}` : ''}` });
 
-  const interaction = await ai.interactions.create(
-    {
-      model,
-      system_instruction: SYSTEM,
-      input: [{ type: 'user_input', content: parts }],
-      response_format: { type: 'text', mime_type: 'application/json', schema: EDITAL_SCHEMA },
-      store: false,
-    },
-    {
-      timeout_ms: 15 * 60 * 1000,
-      retries: {
-        strategy: 'backoff',
-        backoff: {
-          initialInterval: 1000,
-          maxInterval: 10000,
-          exponent: 2,
-          maxElapsedTime: 15 * 60 * 1000,
-        },
-        retryConnectionErrors: true,
-      },
-    },
-  );
+  const baseReq = {
+    model,
+    system_instruction: SYSTEM,
+    input: [{ type: 'user_input', content: parts }],
+    generation_config: { thinking_level: 'low' },
+    response_format: { type: 'text', mime_type: 'application/json', schema: EDITAL_SCHEMA },
+  };
 
-  const raw = interaction.output_text || '';
-  let data;
+  let interaction;
   try {
-    data = JSON.parse(raw);
-  } catch {
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error('A IA não retornou um JSON válido. Tente novamente.');
-    data = JSON.parse(match[0]);
+    // Executa em segundo plano na API Gemini para responder imediatamente e evitar timeout em serverless
+    interaction = await ai.interactions.create(
+      { ...baseReq, background: true, store: true },
+      { timeout_ms: 45_000, maxRetries: 1 },
+    );
+  } catch (err) {
+    // Fallback síncrono caso o modelo/conta não suporte background: true
+    if (err.status === 400 && /background|store/i.test(err.message || '')) {
+      interaction = await ai.interactions.create(
+        { ...baseReq, store: false },
+        { timeout_ms: 240_000, maxRetries: 1 },
+      );
+      return finalizeEditalData(interaction, { url: input.url, fontes, model });
+    }
+    throw err;
   }
-  if (!data.url && input.url && fontes.includes('pagina')) data.url = input.url;
-  if (!data.editalUrl && input.url && fontes.includes('pdf-url')) data.editalUrl = input.url;
-  return { data, fontes, model };
+
+  if (interaction.status === 'completed') {
+    return finalizeEditalData(interaction, { url: input.url, fontes, model });
+  }
+  if (interaction.status === 'failed' || interaction.status === 'cancelled') {
+    throw new Error(interaction.error?.message || 'A IA não conseguiu concluir a leitura do edital.');
+  }
+
+  return {
+    status: interaction.status || 'in_progress',
+    jobId: interaction.id,
+    fontes,
+    model,
+    url: input.url || '',
+  };
+}
+
+export async function getEditalJobStatus(jobId, { url = '', fontes = [], userId = null } = {}) {
+  const { ai, model } = await client(userId);
+  const interaction = await ai.interactions.get(jobId, {}, { timeout_ms: 20_000, maxRetries: 1 });
+
+  if (interaction.status === 'completed') {
+    return finalizeEditalData(interaction, { url, fontes, model });
+  }
+  if (interaction.status === 'failed' || interaction.status === 'cancelled') {
+    const err = new Error(interaction.error?.message || 'Falha ao processar o edital na IA. Tente novamente.');
+    err.status = 502;
+    throw err;
+  }
+  return { status: interaction.status || 'in_progress', jobId };
 }
 
 /** Gera um resumo curto (em linguagem natural) das alterações detectadas na página. */
@@ -337,19 +379,47 @@ async function imagePart(ai, buffer, mimeType) {
   }
 }
 
+function finalizeGabaritoData(interaction, { total, opcoesValidas, permiteX, isCE, model }) {
+  const parsed = parseJsonResult(interaction.output_text, 'A IA não conseguiu extrair o gabarito do arquivo enviado.');
+  const validSet = new Set([...opcoesValidas, ...(permiteX ? ['X'] : [])]);
+  const out = Array(total).fill('');
+  let lidas = 0;
+
+  for (const item of parsed.respostas || []) {
+    const q = Number(item?.questao);
+    if (!Number.isInteger(q) || q < 1 || q > total) continue;
+    let r = String(item?.resposta || '').trim().toUpperCase();
+    if (r === '*' || r === '#' || /^ANUL|^NULA/.test(r)) r = 'X';
+    if (isCE && r === 'CERTO') r = 'C';
+    if (isCE && r === 'ERRADO') r = 'E';
+    if (validSet.has(r)) {
+      if (!out[q - 1]) lidas++;
+      out[q - 1] = r;
+    }
+  }
+
+  return {
+    status: 'completed',
+    respostas: out,
+    lidas,
+    observacao: (parsed.observacao || '').trim(),
+    model: interaction.model || model,
+  };
+}
+
 /**
  * Extrai respostas de um gabarito oficial ou cartão-resposta do usuário (PDF, TXT ou imagem).
- * @param {{ fileBase64: string, mimeType?: string, fileName?: string, modo?: 'oficial'|'usuario', tipoQuestao?: 'multipla'|'certo_errado', numAlternativas?: number, totalQuestoes?: number, cargo?: string, nomeProva?: string }} input
+ * @param {{ fileBuffer?: Buffer, fileBase64?: string, mimeType?: string, fileName?: string, modo?: 'oficial'|'usuario', tipoQuestao?: 'multipla'|'certo_errado', numAlternativas?: number, totalQuestoes?: number, cargo?: string, nomeProva?: string }} input
  */
 export async function extractGabarito(input, userId = null) {
-  if (!input?.fileBase64) {
+  if (!input?.fileBuffer && !input?.fileBase64) {
     const err = new Error('Envie um arquivo PDF, TXT ou imagem (JPG/PNG) do gabarito.');
     err.status = 400;
     throw err;
   }
 
   const { ai, model } = await client(userId);
-  const buffer = Buffer.from(input.fileBase64, 'base64');
+  const buffer = input.fileBuffer || Buffer.from(input.fileBase64, 'base64');
   const rawMime = (input.mimeType || '').toLowerCase();
   const ext = (input.fileName || '').toLowerCase().split('.').pop();
 
@@ -397,60 +467,61 @@ export async function extractGabarito(input, userId = null) {
     text: `Extraia todas as respostas do gabarito presente no arquivo.\n\nContexto da prova:\n${contexto}\n\nInstruções:\n- Identifique cada número de questão (1 até ${total}) e sua respectiva resposta.\n- Caso o documento contenha gabaritos de vários cargos ou tipos de prova, priorize o cargo/prova informado no contexto (ou o primeiro gabarito compatível com ${total} questões).\n- Padronize cada resposta como uma única letra maiúscula dentre [${[...opcoesValidas, ...(permiteX ? ['X'] : [])].join(', ')}] ou "" se em branco.`,
   });
 
-  const interaction = await ai.interactions.create(
-    {
-      model,
-      system_instruction: 'Você é um leitor óptico e extrator especialista em gabaritos e cartões-resposta de concursos públicos brasileiros. Extraia com exatidão o número de cada questão e a alternativa marcada.',
-      input: [{ type: 'user_input', content: parts }],
-      response_format: { type: 'text', mime_type: 'application/json', schema: GABARITO_SCHEMA },
-      store: false,
-    },
-    {
-      timeout_ms: 10 * 60 * 1000,
-      retries: {
-        strategy: 'backoff',
-        backoff: {
-          initialInterval: 1000,
-          maxInterval: 10000,
-          exponent: 2,
-          maxElapsedTime: 10 * 60 * 1000,
-        },
-        retryConnectionErrors: true,
-      },
-    },
-  );
+  const baseReq = {
+    model,
+    system_instruction: 'Você é um leitor óptico e extrator especialista em gabaritos e cartões-resposta de concursos públicos brasileiros. Extraia com exatidão o número de cada questão e a alternativa marcada.',
+    input: [{ type: 'user_input', content: parts }],
+    generation_config: { thinking_level: 'low' },
+    response_format: { type: 'text', mime_type: 'application/json', schema: GABARITO_SCHEMA },
+  };
 
-  const raw = interaction.output_text || '';
-  let parsed;
+  const meta = { total, opcoesValidas, permiteX, isCE, model };
+  let interaction;
   try {
-    parsed = JSON.parse(raw);
-  } catch {
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error('A IA não conseguiu extrair o gabarito do arquivo enviado.');
-    parsed = JSON.parse(match[0]);
-  }
-
-  const validSet = new Set([...opcoesValidas, ...(permiteX ? ['X'] : [])]);
-  const out = Array(total).fill('');
-  let lidas = 0;
-
-  for (const item of parsed.respostas || []) {
-    const q = Number(item?.questao);
-    if (!Number.isInteger(q) || q < 1 || q > total) continue;
-    let r = String(item?.resposta || '').trim().toUpperCase();
-    if (r === '*' || r === '#' || /^ANUL|^NULA/.test(r)) r = 'X';
-    if (isCE && r === 'CERTO') r = 'C';
-    if (isCE && r === 'ERRADO') r = 'E';
-    if (validSet.has(r)) {
-      if (!out[q - 1]) lidas++;
-      out[q - 1] = r;
+    interaction = await ai.interactions.create(
+      { ...baseReq, background: true, store: true },
+      { timeout_ms: 45_000, maxRetries: 1 },
+    );
+  } catch (err) {
+    if (err.status === 400 && /background|store/i.test(err.message || '')) {
+      interaction = await ai.interactions.create(
+        { ...baseReq, store: false },
+        { timeout_ms: 180_000, maxRetries: 1 },
+      );
+      return finalizeGabaritoData(interaction, meta);
     }
+    throw err;
   }
 
+  if (interaction.status === 'completed') {
+    return finalizeGabaritoData(interaction, meta);
+  }
+  if (interaction.status === 'failed' || interaction.status === 'cancelled') {
+    throw new Error(interaction.error?.message || 'A IA não conseguiu extrair o gabarito do arquivo enviado.');
+  }
   return {
-    respostas: out,
-    lidas,
-    observacao: (parsed.observacao || '').trim(),
+    status: interaction.status || 'in_progress',
+    jobId: interaction.id,
     model,
   };
+}
+
+export async function getGabaritoJobStatus(jobId, opts, userId = null) {
+  const { ai, model } = await client(userId);
+  const interaction = await ai.interactions.get(jobId, {}, { timeout_ms: 20_000, maxRetries: 1 });
+  const total = Math.max(1, Number(opts?.totalQuestoes) || 100);
+  const isCE = opts?.tipoQuestao === 'certo_errado';
+  const numAlt = Math.min(Math.max(Number(opts?.numAlternativas) || 5, 2), 6);
+  const opcoesValidas = isCE ? ['C', 'E'] : 'ABCDEF'.slice(0, numAlt).split('');
+  const permiteX = opts?.modo !== 'usuario';
+
+  if (interaction.status === 'completed') {
+    return finalizeGabaritoData(interaction, { total, opcoesValidas, permiteX, isCE, model });
+  }
+  if (interaction.status === 'failed' || interaction.status === 'cancelled') {
+    const err = new Error(interaction.error?.message || 'A IA não conseguiu extrair o gabarito do arquivo enviado.');
+    err.status = 502;
+    throw err;
+  }
+  return { status: interaction.status || 'in_progress', jobId };
 }

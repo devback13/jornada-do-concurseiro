@@ -13,7 +13,7 @@ import {
   setSessionCookie,
   clearSessionCookie,
 } from './auth.js';
-import { extractEdital, extractGabarito, aiAvailable, getAiConfig, testAi, DEFAULT_MODEL } from './ai.js';
+import { extractEdital, getEditalJobStatus, extractGabarito, getGabaritoJobStatus, aiAvailable, getAiConfig, testAi, DEFAULT_MODEL } from './ai.js';
 import { checkConcurso, runAll, startScheduler, isRunning, DEFAULT_HORARIOS } from './monitor.js';
 
 const app = express();
@@ -220,11 +220,35 @@ app.delete('/api/notificacoes/:id', requireAuth, wrap(async (req, res) => {
 // ----------------------------- IA -----------------------------
 app.post('/api/ia/extrair', requireAuth, wrap(async (req, res) => {
   const { fileBase64, mimeType, text, url } = req.body || {};
-  res.json(await extractEdital({ fileBase64, mimeType, text, url: url?.trim() || undefined }, req.user.id));
+  const result = await extractEdital({ fileBase64, mimeType, text, url: url?.trim() || undefined }, req.user.id);
+  res.status(result.status === 'completed' ? 200 : 202).json(result);
+}));
+
+app.post(
+  '/api/ia/extrair-arquivo',
+  requireAuth,
+  express.raw({ type: ['application/pdf', 'text/plain', 'text/html', 'application/octet-stream'], limit: '45mb' }),
+  wrap(async (req, res) => {
+    const fileBuffer = Buffer.isBuffer(req.body) && req.body.length ? req.body : null;
+    const mimeType = req.headers['x-file-mime'] ? decodeURIComponent(String(req.headers['x-file-mime'])) : (req.headers['content-type'] || 'application/pdf').split(';')[0];
+    const url = req.headers['x-concurso-url'] ? decodeURIComponent(String(req.headers['x-concurso-url'])).trim() : undefined;
+    const result = await extractEdital({ fileBuffer, mimeType, url }, req.user.id);
+    res.status(result.status === 'completed' ? 200 : 202).json(result);
+  }),
+);
+
+app.post('/api/ia/status/:id', requireAuth, wrap(async (req, res) => {
+  const { url = '', fontes = [] } = req.body || {};
+  res.json(await getEditalJobStatus(req.params.id, { url, fontes, userId: req.user.id }));
 }));
 
 app.post('/api/ia/extrair-gabarito', requireAuth, wrap(async (req, res) => {
-  res.json(await extractGabarito(req.body || {}, req.user.id));
+  const result = await extractGabarito(req.body || {}, req.user.id);
+  res.status(result.status === 'completed' ? 200 : 202).json(result);
+}));
+
+app.post('/api/ia/gabarito-status/:id', requireAuth, wrap(async (req, res) => {
+  res.json(await getGabaritoJobStatus(req.params.id, req.body || {}, req.user.id));
 }));
 
 app.post('/api/ia/testar', requireAuth, wrap(async (req, res) => {
