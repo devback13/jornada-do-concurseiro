@@ -76,7 +76,7 @@ function AIImport({ onResult }) {
         <AlertCircle size={22} />
         <div>
           <strong>Configure a IA para ler editais automaticamente</strong>
-          <p>Informe sua chave da API Gemini em Configurações (é gratuita para começar, em aistudio.google.com). Enquanto isso, você pode cadastrar manualmente.</p>
+          <p>Informe sua chave da API Gemini, ChatGPT (OpenAI) ou Claude (Anthropic) em Configurações. Enquanto isso, você pode cadastrar manualmente.</p>
           <div className="row gap">
             <a className="btn btn-primary btn-sm" href="#/config"><Settings size={16} /> Ir para Configurações</a>
             <a className="btn btn-ghost btn-sm" href="#/novo?modo=manual"><PenLine size={16} /> Cadastrar manualmente</a>
@@ -90,7 +90,7 @@ function AIImport({ onResult }) {
     return (
       <div className="card ai-loading" aria-live="polite">
         <div className="ai-orb"><Sparkles size={34} /></div>
-        <h2>Analisando o edital com IA</h2>
+        <h2>Analisando o edital com {config?.aiProviderShortLabel || 'IA'}</h2>
         <p className="muted">Isso costuma levar de 20 segundos a 2 minutos, dependendo do tamanho do edital.</p>
         <ol className="ai-steps">
           {STEPS.map((s, i) => (

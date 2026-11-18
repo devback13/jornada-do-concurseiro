@@ -1,50 +1,90 @@
 import { useEffect, useRef, useState } from 'react';
-import { KeyRound, Eye, EyeOff, Radar, Plus, X, Save, Loader2, Zap, Download, Upload, Database, CheckCircle2, RefreshCw } from 'lucide-react';
+import {
+  KeyRound, Eye, EyeOff, Radar, Plus, X, Save, Loader2, Zap, Download, Upload,
+  Database, CheckCircle2, RefreshCw, Sparkles, Check, Bot, Cpu,
+} from 'lucide-react';
 import { api } from '../lib/api.js';
 import { useConfig } from '../lib/configContext.js';
 import { fmtDateTime } from '../lib/format.js';
 import { Field, Spinner, useToast } from '../components/ui.jsx';
 
+const PROVIDER_META = [
+  { id: 'gemini', title: 'Google Gemini', sub: 'Gemini 3.8 / 4', keyField: 'geminiApiKey', modelField: 'geminiModel', icon: Sparkles, accent: 'p-gemini', placeholder: 'AIza…' },
+  { id: 'openai', title: 'ChatGPT (OpenAI)', sub: 'GPT-6 / GPT-5 / 4o', keyField: 'openaiApiKey', modelField: 'openaiModel', icon: Bot, accent: 'p-openai', placeholder: 'sk-…' },
+  { id: 'anthropic', title: 'Claude (Anthropic)', sub: 'Claude 5.5 / 4.5', keyField: 'anthropicApiKey', modelField: 'anthropicModel', icon: Cpu, accent: 'p-anthropic', placeholder: 'sk-ant-…' },
+];
+
 export default function Configuracoes({ user }) {
   const { config, reload } = useConfig();
   const toast = useToast();
-  const [key, setKey] = useState('');
+  const [selected, setSelected] = useState('gemini');
+  const [keys, setKeys] = useState({ gemini: '', openai: '', anthropic: '' });
+  const [models, setModels] = useState({ gemini: '', openai: '', anthropic: '' });
   const [show, setShow] = useState(false);
-  const [model, setModel] = useState('');
   const [horarios, setHorarios] = useState([]);
   const [novoHorario, setNovoHorario] = useState('12:00');
   const [busy, setBusy] = useState('');
+  const initializedRef = useRef(false);
   const fileRef = useRef(null);
 
   useEffect(() => {
-    if (config) { setModel(config.geminiModel); setHorarios(config.monitorHorarios); }
+    if (!config) return;
+    if (!initializedRef.current) {
+      setSelected(config.aiProvider || 'gemini');
+      initializedRef.current = true;
+    }
+    setModels({
+      gemini: config.providers?.gemini?.model || config.geminiModel || '',
+      openai: config.providers?.openai?.model || '',
+      anthropic: config.providers?.anthropic?.model || '',
+    });
+    setHorarios(config.monitorHorarios || []);
   }, [config]);
 
   if (!config) return <div className="page-loading"><Spinner size={28} /></div>;
+
+  const meta = PROVIDER_META.find((p) => p.id === selected) || PROVIDER_META[0];
+  const providerCfg = config.providers?.[selected] || {};
+  const isActive = config.aiProvider === selected;
 
   const run = async (name, fn) => {
     setBusy(name);
     try { await fn(); } catch (e) { toast(e.message, { type: 'error' }); } finally { setBusy(''); }
   };
 
-  const saveIa = () => run('ia', async () => {
-    const patch = { geminiModel: model || config.modeloPadrao };
-    if (key.trim()) patch.geminiApiKey = key.trim();
+  const saveProvider = (activate = false) => run('ia', async () => {
+    const patch = {
+      [meta.modelField]: (models[selected] || providerCfg.modeloPadrao || '').trim(),
+    };
+    const typedKey = (keys[selected] || '').trim();
+    if (typedKey) patch[meta.keyField] = typedKey;
+    if (activate || (!config.iaDisponivel && typedKey)) patch.aiProvider = selected;
     await api.saveConfig(patch);
-    setKey('');
+    setKeys((prev) => ({ ...prev, [selected]: '' }));
     await reload();
-    toast('Configurações de IA salvas.');
+    toast(
+      activate
+        ? `${meta.title} salvo e definido como provedor de IA ativo.`
+        : `Configurações de ${meta.title} salvas.`,
+    );
+  });
+
+  const activateOnly = (providerId) => run(`act-${providerId}`, async () => {
+    const target = PROVIDER_META.find((p) => p.id === providerId);
+    await api.saveConfig({ aiProvider: providerId });
+    await reload();
+    toast(`${target?.title || providerId} agora é o provedor de IA ativo.`);
   });
 
   const removeKey = () => run('rm', async () => {
-    await api.saveConfig({ geminiApiKey: '' });
+    await api.saveConfig({ [meta.keyField]: '' });
     await reload();
-    toast('Chave removida do aplicativo.');
+    toast(`Chave de ${meta.title} removida da sua conta.`);
   });
 
   const testar = () => run('test', async () => {
-    const r = await api.testarIa();
-    toast(`Conexão OK com ${r.model}.`, { title: 'IA funcionando' });
+    const r = await api.testarIa(selected);
+    toast(`Conexão OK com ${r.providerLabel} (${r.model}).`, { title: 'IA funcionando' });
   });
 
   const saveHorarios = (list) => run('hor', async () => {
@@ -67,37 +107,130 @@ export default function Configuracoes({ user }) {
     toast(`${r.importados} concurso(s) importado(s).`);
   });
 
+  const canActivate = providerCfg.disponivel && !isActive;
+
   return (
     <div className="narrow settings">
       <h1>Configurações</h1>
-      <p className="muted">Ajuste a inteligência artificial, o monitoramento e seus dados.</p>
+      <p className="muted">Ajuste os provedores de inteligência artificial, o monitoramento e seus dados.</p>
 
       <section className="card form-section">
         <header>
           <span className="section-icon"><KeyRound size={18} /></span>
           <div>
-            <h2>Inteligência artificial (Gemini)</h2>
-            <p className="muted small">Usada para ler editais e resumir alterações nas páginas monitoradas.</p>
+            <h2>Inteligência artificial (Gemini, ChatGPT e Claude)</h2>
+            <p className="muted small">
+              Usada para ler editais, preencher gabaritos (pessoal e oficial) e resumir alterações nas páginas monitoradas.
+            </p>
           </div>
-          <span className={`status-pill ${config.iaDisponivel ? 'ok' : 'off'}`}>{config.iaDisponivel ? <><CheckCircle2 size={14} /> Ativa</> : 'Não configurada'}</span>
+          <span className={`status-pill ${config.iaDisponivel ? 'ok' : 'off'}`}>
+            {config.iaDisponivel ? <><CheckCircle2 size={14} /> Ativa · {config.aiProviderShortLabel}</> : 'Não configurada'}
+          </span>
         </header>
-        <div className="form-section-body grid-form">
-          <Field label="Chave da API Gemini" className="span-3"
-            hint={config.chaveMascarada
-              ? <>Chave atual: <code>{config.chaveMascarada}</code> ({config.chaveOrigem === 'env' ? 'definida no arquivo .env' : 'salva no aplicativo'}). Deixe em branco para manter.</>
-              : <>Gere gratuitamente em <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">aistudio.google.com/apikey</a>. Ela fica salva apenas neste computador.</>}>
-            <div className="input-icon right">
-              <input type={show ? 'text' : 'password'} value={key} onChange={(e) => setKey(e.target.value)} placeholder={config.chaveMascarada ? '••••••••••••' : 'Cole sua chave aqui'} autoComplete="off" />
-              <button type="button" className="icon-btn sm" onClick={() => setShow((s) => !s)} aria-label={show ? 'Ocultar chave' : 'Mostrar chave'}>{show ? <EyeOff size={16} /> : <Eye size={16} />}</button>
+
+        <div className="form-section-body">
+          <div className="ai-provider-grid" role="tablist" aria-label="Provedores de IA">
+            {PROVIDER_META.map((p) => {
+              const Icon = p.icon;
+              const info = config.providers?.[p.id] || {};
+              const active = config.aiProvider === p.id && info.disponivel;
+              const isSel = selected === p.id;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={isSel}
+                  className={`provider-card ${p.accent} ${isSel ? 'selected' : ''} ${active ? 'is-active' : ''}`}
+                  onClick={() => { setSelected(p.id); setShow(false); }}
+                >
+                  <div className="provider-card-top">
+                    <span className="provider-icon"><Icon size={18} /></span>
+                    {active ? (
+                      <span className="provider-badge active"><Check size={12} /> Em uso</span>
+                    ) : info.disponivel ? (
+                      <span className="provider-badge ready">Configurada</span>
+                    ) : (
+                      <span className="provider-badge empty">Sem chave</span>
+                    )}
+                  </div>
+                  <strong>{p.title}</strong>
+                  <span className="muted small">{info.model || p.sub}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="provider-panel grid-form">
+            {canActivate && (
+              <div className="span-4 provider-activate-bar">
+                <span className="small">
+                  <strong>{meta.title}</strong> já possui chave configurada, mas o provedor ativo atual é <strong>{config.aiProviderLabel}</strong>.
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={() => activateOnly(selected)}
+                  disabled={busy === `act-${selected}`}
+                >
+                  {busy === `act-${selected}` ? <Loader2 size={14} className="spin" /> : <Check size={14} />}
+                  Usar {providerCfg.shortLabel || meta.title} como ativo
+                </button>
+              </div>
+            )}
+
+            <Field
+              label={`Chave da API — ${meta.title}`}
+              className="span-3"
+              hint={providerCfg.chaveMascarada
+                ? <>Chave atual: <code>{providerCfg.chaveMascarada}</code> ({providerCfg.chaveOrigem === 'env' ? 'definida nas variáveis do servidor' : 'salva na sua conta'}). Deixe em branco para manter.</>
+                : <>Obtenha sua chave em <a href={providerCfg.docsUrl} target="_blank" rel="noreferrer">{providerCfg.docsLabel}</a>. Ela fica salva apenas na sua conta.</>}
+            >
+              <div className="input-icon right">
+                <input
+                  type={show ? 'text' : 'password'}
+                  value={keys[selected] || ''}
+                  onChange={(e) => setKeys((prev) => ({ ...prev, [selected]: e.target.value }))}
+                  placeholder={providerCfg.chaveMascarada ? '••••••••••••' : `Cole sua chave (${meta.placeholder})`}
+                  autoComplete="off"
+                />
+                <button type="button" className="icon-btn sm" onClick={() => setShow((s) => !s)} aria-label={show ? 'Ocultar chave' : 'Mostrar chave'}>
+                  {show ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+            </Field>
+
+            <Field label="Modelo" hint={`Padrão: ${providerCfg.modeloPadrao || ''}`}>
+              <input
+                list={`models-${selected}`}
+                value={models[selected] || ''}
+                onChange={(e) => setModels((prev) => ({ ...prev, [selected]: e.target.value }))}
+                placeholder={providerCfg.modeloPadrao}
+              />
+              <datalist id={`models-${selected}`}>
+                {(providerCfg.suggestedModels || []).map((m) => <option key={m} value={m} />)}
+              </datalist>
+            </Field>
+
+            <div className="span-4 row gap-sm wrap">
+              <button className="btn btn-primary" onClick={() => saveProvider(!isActive)} disabled={busy === 'ia'}>
+                {busy === 'ia' ? <Loader2 size={16} className="spin" /> : <Save size={16} />}
+                {isActive ? 'Salvar' : `Salvar e usar ${providerCfg.shortLabel || meta.title}`}
+              </button>
+              {!isActive && (
+                <button className="btn btn-outline" onClick={() => saveProvider(false)} disabled={busy === 'ia'}>
+                  Apenas salvar chave
+                </button>
+              )}
+              <button className="btn btn-outline" onClick={testar} disabled={!providerCfg.disponivel || busy === 'test'}>
+                {busy === 'test' ? <Loader2 size={16} className="spin" /> : <Zap size={16} />} Testar conexão
+              </button>
+              {providerCfg.chaveOrigem === 'app' && (
+                <button className="btn btn-ghost danger" onClick={removeKey} disabled={busy === 'rm'}>
+                  Remover chave
+                </button>
+              )}
             </div>
-          </Field>
-          <Field label="Modelo" hint={`Padrão: ${config.modeloPadrao}`}>
-            <input value={model} onChange={(e) => setModel(e.target.value)} placeholder={config.modeloPadrao} />
-          </Field>
-          <div className="span-4 row gap-sm wrap">
-            <button className="btn btn-primary" onClick={saveIa} disabled={busy === 'ia'}>{busy === 'ia' ? <Loader2 size={16} className="spin" /> : <Save size={16} />} Salvar</button>
-            <button className="btn btn-outline" onClick={testar} disabled={!config.iaDisponivel || busy === 'test'}>{busy === 'test' ? <Loader2 size={16} className="spin" /> : <Zap size={16} />} Testar conexão</button>
-            {config.chaveOrigem === 'app' && <button className="btn btn-ghost danger" onClick={removeKey} disabled={busy === 'rm'}>Remover chave</button>}
           </div>
         </div>
       </section>
@@ -107,7 +240,10 @@ export default function Configuracoes({ user }) {
           <span className="section-icon"><Radar size={18} /></span>
           <div>
             <h2>Monitoramento de páginas</h2>
-            <p className="muted small">Horários em que as páginas dos concursos são verificadas (padrão: 2x ao dia). O aplicativo precisa estar em execução.</p>
+            <p className="muted small">
+              Horários em que as páginas dos concursos são verificadas (padrão: 2x ao dia).
+              {config.iaDisponivel && <> Alterações detectadas são resumidas automaticamente usando <strong>{config.aiProviderLabel}</strong>.</>}
+            </p>
           </div>
         </header>
         <div className="form-section-body">

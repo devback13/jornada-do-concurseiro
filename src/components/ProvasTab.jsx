@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, Trash2, ClipboardList, ChevronUp, ChevronDown, Settings2, BookOpen, CheckSquare, UserCheck, Trophy, ClipboardPaste, Eraser, Copy, Loader2, Check, AlertTriangle, Info, UploadCloud, Sparkles, FileText, Image as ImageIcon } from 'lucide-react';
 import { calcular, totalQuestoes, pontuacaoMaxima, faixas, parseGabarito, gabaritoToString } from '../lib/scoring.js';
 import { api, fileToBase64 } from '../lib/api.js';
+import { useConfig } from '../lib/configContext.js';
 import { Field, Segmented, Ring, EmptyState, ConfirmDialog, useDebouncedCallback, useToast } from './ui.jsx';
 import AnswerGrid from './AnswerGrid.jsx';
 
@@ -76,6 +77,7 @@ function DisciplinasEditor({ prova, onChange }) {
 }
 
 function PasteBox({ prova, modo, onApply }) {
+  const { config } = useConfig();
   const [txt, setTxt] = useState('');
   const [uploading, setUploading] = useState(false);
   const [drag, setDrag] = useState(false);
@@ -175,7 +177,7 @@ function PasteBox({ prova, modo, onApply }) {
             <span className="gab-upload-icon"><UploadCloud size={20} /></span>
             <div className="gab-upload-text">
               <strong>
-                <Sparkles size={14} className="ia-spark" /> Importar {labelModo} com IA
+                <Sparkles size={14} className="ia-spark" /> Importar {labelModo} com {config?.aiProviderShortLabel || 'IA'}
               </strong>
               <span className="muted small">
                 Arraste ou clique para enviar <b>PDF</b>, <b>TXT</b> ou <b>Imagem (JPG, JPEG, PNG)</b> — preenchimento automático das {total} questões

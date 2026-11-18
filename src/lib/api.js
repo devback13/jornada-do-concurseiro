@@ -121,7 +121,7 @@ export const api = {
     const { fileBase64, ...meta } = payload;
     return pollUntilDone(() => request('POST', `/api/ia/gabarito-status/${encodeURIComponent(start.jobId)}`, meta));
   },
-  testarIa: () => request('POST', '/api/ia/testar'),
+  testarIa: (provider) => request('POST', '/api/ia/testar', provider ? { provider } : {}),
   getConfig: () => request('GET', '/api/config'),
   saveConfig: (data) => request('PUT', '/api/config', data),
   importBackup: (data) => request('POST', '/api/backup', data),

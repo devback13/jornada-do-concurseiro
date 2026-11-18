@@ -132,7 +132,7 @@ export default function MonitorTab({ concurso: c, setConcurso }) {
           </div>
           {config && (
             <p className="muted small">
-              Verificações automáticas às {(config.monitorHorarios || []).join(' e ')}{config.iaDisponivel && <> · <Sparkles size={12} /> resumos das alterações gerados por IA</>}.
+              Verificações automáticas às {(config.monitorHorarios || []).join(' e ')}{config.iaDisponivel && <> · <Sparkles size={12} /> resumos das alterações gerados por {config.aiProviderLabel || 'IA'}</>}.
             </p>
           )}
         </div>

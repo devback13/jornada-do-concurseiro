@@ -13,7 +13,17 @@ import {
   setSessionCookie,
   clearSessionCookie,
 } from './auth.js';
-import { extractEdital, getEditalJobStatus, extractGabarito, getGabaritoJobStatus, aiAvailable, getAiConfig, testAi, DEFAULT_MODEL } from './ai.js';
+import {
+  extractEdital,
+  getEditalJobStatus,
+  extractGabarito,
+  getGabaritoJobStatus,
+  getAllProvidersConfig,
+  testAi,
+  PROVIDERS,
+  PROVIDER_IDS,
+  DEFAULT_MODEL,
+} from './ai.js';
 import { checkConcurso, runAll, startScheduler, isRunning, DEFAULT_HORARIOS } from './monitor.js';
 
 const app = express();
@@ -252,18 +262,50 @@ app.post('/api/ia/gabarito-status/:id', requireAuth, wrap(async (req, res) => {
 }));
 
 app.post('/api/ia/testar', requireAuth, wrap(async (req, res) => {
-  res.json(await testAi(req.user.id));
+  const provider = typeof req.body?.provider === 'string' && PROVIDERS[req.body.provider] ? req.body.provider : null;
+  res.json(await testAi(req.user.id, provider));
 }));
 
 // ----------------------------- Configurações -----------------------------
+function maskKey(k) {
+  if (!k) return '';
+  if (k.length <= 10) return '••••••';
+  return `${k.slice(0, 5)}…${k.slice(-4)}`;
+}
+
 async function publicSettings(userId) {
   const s = await db.getSettings(userId);
-  const { apiKey, model, hasUserKey } = await getAiConfig(userId);
+  const { active, providers } = await getAllProvidersConfig(userId);
+  const activeEntry = providers[active];
+
+  const publicProviders = {};
+  for (const id of PROVIDER_IDS) {
+    const p = providers[id];
+    publicProviders[id] = {
+      id: p.id,
+      label: p.label,
+      shortLabel: p.shortLabel,
+      disponivel: Boolean(p.apiKey),
+      chaveOrigem: p.source,
+      chaveMascarada: maskKey(p.apiKey),
+      model: p.model,
+      modeloPadrao: p.defaultModel,
+      suggestedModels: p.suggestedModels,
+      docsUrl: p.docsUrl,
+      docsLabel: p.docsLabel,
+    };
+  }
+
   return {
-    iaDisponivel: Boolean(apiKey),
-    chaveOrigem: hasUserKey ? 'app' : apiKey ? 'env' : null,
-    chaveMascarada: apiKey ? `${apiKey.slice(0, 4)}…${apiKey.slice(-4)}` : '',
-    geminiModel: model,
+    aiProvider: active,
+    aiProviderLabel: activeEntry.label,
+    aiProviderShortLabel: activeEntry.shortLabel,
+    iaDisponivel: Boolean(activeEntry.apiKey),
+    providers: publicProviders,
+    // Campos legados mantidos por compatibilidade
+    chaveOrigem: activeEntry.source,
+    chaveMascarada: maskKey(activeEntry.apiKey),
+    geminiModel: providers.gemini.model,
     modeloPadrao: DEFAULT_MODEL,
     monitorHorarios: s.monitorHorarios?.length ? s.monitorHorarios : DEFAULT_HORARIOS,
     ultimaRodadaMonitor: s.ultimaRodadaMonitor || null,
@@ -279,8 +321,14 @@ app.get('/api/config', requireAuth, wrap(async (req, res) => {
 app.put('/api/config', requireAuth, wrap(async (req, res) => {
   const patch = {};
   const b = req.body || {};
-  if (typeof b.geminiApiKey === 'string') patch.geminiApiKey = b.geminiApiKey.trim();
-  if (typeof b.geminiModel === 'string') patch.geminiModel = b.geminiModel.trim();
+  if (typeof b.aiProvider === 'string' && PROVIDERS[b.aiProvider]) {
+    patch.aiProvider = b.aiProvider;
+  }
+  for (const id of PROVIDER_IDS) {
+    const { settingsKey, settingsModel } = PROVIDERS[id];
+    if (typeof b[settingsKey] === 'string') patch[settingsKey] = b[settingsKey].trim();
+    if (typeof b[settingsModel] === 'string') patch[settingsModel] = b[settingsModel].trim();
+  }
   if (Array.isArray(b.monitorHorarios)) {
     const valid = [...new Set(b.monitorHorarios.filter((h) => /^([01]\d|2[0-3]):[0-5]\d$/.test(h)))].sort();
     if (!valid.length) throw Object.assign(new Error('Informe ao menos um horário válido (HH:MM).'), { status: 400 });
@@ -320,16 +368,19 @@ app.use('/api', (req, res) => res.status(404).json({ error: 'Rota não encontrad
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
-  const status = err.status || (err.type === 'entity.too.large' ? 413 : 500);
+  const isUpstreamAiAuth = req.path.startsWith('/api/ia/') && (err.status === 401 || /API key not valid|API_KEY_INVALID|PERMISSION_DENIED/i.test(err.message || ''));
+  const status = isUpstreamAiAuth ? 400 : (err.status || (err.type === 'entity.too.large' ? 413 : 500));
   const causeMsg = err.cause?.cause?.message || err.cause?.message || '';
   if (status >= 500) console.error('[api]', err, causeMsg ? `(causa: ${causeMsg})` : '');
   const message = err.type === 'entity.too.large'
     ? 'Arquivo muito grande (máx. ~40 MB).'
     : /API key not valid|API_KEY_INVALID|PERMISSION_DENIED/i.test(err.message || '')
       ? 'Chave da API Gemini inválida ou sem permissão.'
-      : causeMsg && !err.message.includes(causeMsg)
-        ? `${err.message} (${causeMsg})`
-        : err.message || 'Erro interno.';
+      : isUpstreamAiAuth && !/inválida/i.test(err.message || '')
+        ? 'Chave da API de IA inválida ou sem permissão.'
+        : causeMsg && !err.message.includes(causeMsg)
+          ? `${err.message} (${causeMsg})`
+          : err.message || 'Erro interno.';
   res.status(status).json({ error: message });
 });
 
