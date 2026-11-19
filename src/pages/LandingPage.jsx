@@ -2,26 +2,17 @@ import { useState } from 'react';
 import {
   Target, Sparkles, Radar, Trophy, ShieldCheck, CheckCircle2, Eye, EyeOff,
   ArrowRight, FileText, Lock, Mail, User, AlertCircle, Loader2, Moon, Sun,
-  CalendarCheck, Layers, Check,
+  CalendarCheck, Layers, Check, Phone,
 } from 'lucide-react';
 import { api } from '../lib/api.js';
-
-function checkPasswordRules(password = '') {
-  const s = String(password);
-  return [
-    { key: 'length', ok: s.length >= 8, label: 'Mínimo de 8 caracteres' },
-    { key: 'upper', ok: /[A-ZÁÀÂÃÉÊÍÓÔÕÚÇ]/.test(s), label: 'Pelo menos 1 letra maiúscula (A–Z)' },
-    { key: 'lower', ok: /[a-záàâãéêíóôõúç]/.test(s), label: 'Pelo menos 1 letra minúscula (a–z)' },
-    { key: 'digit', ok: /\d/.test(s), label: 'Pelo menos 1 número (0–9)' },
-    { key: 'special', ok: /[^A-Za-z0-9ÁÀÂÃÉÊÍÓÔÕÚÇáàâãéêíóôõúç\s]/.test(s), label: 'Pelo menos 1 caractere especial (!@#$%...)' },
-  ];
-}
+import { formatPhoneInput, checkPasswordRules } from '../lib/format.js';
 
 export default function LandingPage({ onAuthSuccess, theme, onToggleTheme }) {
   const [mode, setMode] = useState('login'); // 'login' | 'register'
   const [nome, setNome] = useState('');
   const [sobrenome, setSobrenome] = useState('');
   const [email, setEmail] = useState('');
+  const [telefone, setTelefone] = useState('');
   const [password, setPassword] = useState('');
   const [showPass, setShowPass] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -60,7 +51,7 @@ export default function LandingPage({ onAuthSuccess, theme, onToggleTheme }) {
     setLoading(true);
     try {
       const res = mode === 'register'
-        ? await api.register({ nome: nome.trim(), sobrenome: sobrenome.trim(), email: email.trim(), password })
+        ? await api.register({ nome: nome.trim(), sobrenome: sobrenome.trim(), email: email.trim(), telefone: telefone.trim(), password })
         : await api.login({ email: email.trim(), password });
       onAuthSuccess(res.user);
     } catch (err) {
@@ -214,6 +205,23 @@ export default function LandingPage({ onAuthSuccess, theme, onToggleTheme }) {
                   />
                 </div>
               </label>
+
+              {mode === 'register' && (
+                <label className="field">
+                  <span className="field-label">Telefone para alertas no Telegram <span className="muted">(opcional)</span></span>
+                  <div className="input-icon">
+                    <Phone size={16} />
+                    <input
+                      type="tel"
+                      inputMode="tel"
+                      value={telefone}
+                      onChange={(e) => setTelefone(formatPhoneInput(e.target.value))}
+                      placeholder="+55 (11) 99999-9999"
+                      autoComplete="tel"
+                    />
+                  </div>
+                </label>
+              )}
 
               <label className="field">
                 <span className="field-label">Senha <span className="req">*</span></span>

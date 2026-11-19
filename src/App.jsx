@@ -86,7 +86,7 @@ export default function App() {
   let params;
   if (route.path === '/' || route.path === '') page = <Dashboard query={route.query} user={user} />;
   else if (route.path === '/novo') page = <NovoConcurso modo={route.query.modo} />;
-  else if (route.path === '/config') page = <Configuracoes user={user} />;
+  else if (route.path === '/config') page = <Configuracoes user={user} onUserUpdated={setUser} />;
   else if ((params = match('/concurso/:id/editar', route.path))) page = <EditarConcurso id={params.id} />;
   else if ((params = match('/concurso/:id', route.path))) page = <ConcursoDetail id={params.id} tab={route.query.aba} />;
   else page = <Dashboard query={{}} user={user} />;
@@ -122,8 +122,10 @@ export default function App() {
                 <Plus size={18} /> <span>Novo concurso</span>
               </button>
               <div className="user-pill" title={`${user.nome} ${user.sobrenome || ''} (${user.email})`.trim()}>
-                <span className="user-avatar" aria-hidden>{initialsUser}</span>
-                <span className="user-name">{user.nome}</span>
+                <a href="#/config" className="user-pill-link" title="Editar perfil e configurações">
+                  <span className="user-avatar" aria-hidden>{initialsUser}</span>
+                  <span className="user-name">{user.nome}</span>
+                </a>
                 <button className="icon-btn sm" onClick={handleLogout} aria-label="Sair da conta" title="Sair da conta">
                   <LogOut size={16} />
                 </button>

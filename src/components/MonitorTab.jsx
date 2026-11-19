@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Radar, RefreshCw, Globe, AlertTriangle, FileText, Plus, Minus, ExternalLink, Clock, CheckCircle2, Activity, Link2, Sparkles, ChevronDown } from 'lucide-react';
+import { Radar, RefreshCw, Globe, AlertTriangle, FileText, Plus, Minus, ExternalLink, Clock, CheckCircle2, Activity, Link2, Sparkles, ChevronDown, Send } from 'lucide-react';
 import { api } from '../lib/api.js';
 import { fmtDateTime, timeAgo } from '../lib/format.js';
 import { useConfig } from '../lib/configContext.js';
@@ -132,7 +132,9 @@ export default function MonitorTab({ concurso: c, setConcurso }) {
           </div>
           {config && (
             <p className="muted small">
-              Verificações automáticas às {(config.monitorHorarios || []).join(' e ')}{config.iaDisponivel && <> · <Sparkles size={12} /> resumos das alterações gerados por {config.aiProviderLabel || 'IA'}</>}.
+              Verificações automáticas às {(config.monitorHorarios || []).join(' e ')}
+              {config.iaDisponivel && <> · <Sparkles size={12} /> resumos das alterações gerados por {config.aiProviderLabel || 'IA'}</>}
+              {config.telegram?.pronto && <> · <Send size={12} /> alertas no Telegram ativos ({config.telegram.telefone || 'vinculado'})</>}.
             </p>
           )}
         </div>

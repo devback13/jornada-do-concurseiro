@@ -85,6 +85,11 @@ export const api = {
     if (r?.token) setAuthToken(r.token);
     return r;
   },
+  updateProfile: async (payload) => {
+    const r = await request('PUT', '/api/auth/profile', payload);
+    if (r?.token) setAuthToken(r.token);
+    return r;
+  },
   logout: async () => {
     setAuthToken('');
     await request('POST', '/api/auth/logout');
@@ -124,6 +129,8 @@ export const api = {
   testarIa: (provider) => request('POST', '/api/ia/testar', provider ? { provider } : {}),
   getConfig: () => request('GET', '/api/config'),
   saveConfig: (data) => request('PUT', '/api/config', data),
+  vincularTelegram: () => request('POST', '/api/telegram/vincular'),
+  testarTelegram: () => request('POST', '/api/telegram/testar'),
   importBackup: (data) => request('POST', '/api/backup', data),
 };
 

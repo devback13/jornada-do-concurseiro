@@ -686,12 +686,26 @@ input, select, textarea { font: inherit; color: inherit; }
   padding: .22rem .3rem .22rem .35rem; border-radius: 999px;
   border: 1px solid var(--border); background: var(--bg-soft);
 }
+.user-pill-link {
+  display: inline-flex; align-items: center; gap: .45rem;
+  color: inherit; text-decoration: none; border-radius: 999px;
+}
+.user-pill-link:hover { text-decoration: none; color: var(--primary); }
 .user-avatar {
   width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
   font-size: .72rem; font-weight: 800; color: #fff;
   background: linear-gradient(135deg, #6366f1, #8b5cf6);
 }
 .user-name { font-size: .84rem; font-weight: 600; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.tg-icon { background: var(--info-soft); color: var(--info); }
+.tg-steps {
+  margin-top: .85rem; padding: .9rem 1rem; border-radius: 11px;
+  background: var(--bg-elev); border: 1px solid var(--border);
+  font-size: .86rem; color: var(--text-2);
+}
+.tg-steps > strong { display: block; color: var(--text); margin-bottom: .35rem; font-size: .88rem; }
+.tg-steps ol { margin: 0; padding-left: 1.25rem; display: flex; flex-direction: column; gap: .3rem; }
 
 /* ---------------------------------------------------------------- Landing Page & Auth */
 .landing-wrap { min-height: 100vh; display: flex; flex-direction: column; }

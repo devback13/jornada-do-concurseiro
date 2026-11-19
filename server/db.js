@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { neon } from '@neondatabase/serverless';
+import { notifyUserTelegram } from './telegram.js';
 
 export const uid = () => crypto.randomUUID();
 export const now = () => new Date().toISOString();
@@ -38,12 +39,14 @@ export async function ensureSchema() {
         nome TEXT NOT NULL,
         sobrenome TEXT DEFAULT '',
         email TEXT UNIQUE NOT NULL,
+        telefone TEXT DEFAULT '',
         password_hash TEXT NOT NULL,
         settings JSONB NOT NULL DEFAULT '{}'::jsonb,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `;
+    await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS telefone TEXT DEFAULT ''`;
     await sql`
       CREATE TABLE IF NOT EXISTS concursos (
         id TEXT PRIMARY KEY,
@@ -117,6 +120,7 @@ function formatUserRow(row) {
     nome: row.nome,
     sobrenome: row.sobrenome || '',
     email: row.email,
+    telefone: row.telefone || '',
     passwordHash: row.password_hash ?? row.passwordHash,
     settings: row.settings || {},
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : row.createdAt,
@@ -128,8 +132,9 @@ function formatUserRow(row) {
 // ---------------------------------------------------------------------------
 export const db = {
   // ---------- Usuários ----------
-  async createUser({ nome, sobrenome = '', email, passwordHash }) {
+  async createUser({ nome, sobrenome = '', email, telefone = '', passwordHash }) {
     const cleanEmail = String(email || '').trim().toLowerCase();
+    const cleanPhone = String(telefone || '').trim();
     const id = uid();
     const createdAt = now();
 
@@ -137,8 +142,8 @@ export const db = {
       await ensureSchema();
       const sql = getSql();
       const rows = await sql`
-        INSERT INTO users (id, nome, sobrenome, email, password_hash, settings, created_at, updated_at)
-        VALUES (${id}, ${nome.trim()}, ${sobrenome.trim()}, ${cleanEmail}, ${passwordHash}, '{}'::jsonb, ${createdAt}, ${createdAt})
+        INSERT INTO users (id, nome, sobrenome, email, telefone, password_hash, settings, created_at, updated_at)
+        VALUES (${id}, ${nome.trim()}, ${sobrenome.trim()}, ${cleanEmail}, ${cleanPhone}, ${passwordHash}, '{}'::jsonb, ${createdAt}, ${createdAt})
         RETURNING *
       `;
       return formatUserRow(rows[0]);
@@ -155,6 +160,7 @@ export const db = {
       nome: nome.trim(),
       sobrenome: sobrenome.trim(),
       email: cleanEmail,
+      telefone: cleanPhone,
       passwordHash,
       settings: {},
       createdAt,
@@ -162,6 +168,59 @@ export const db = {
     s.users.push(user);
     await persistLocal();
     return user;
+  },
+
+  async updateUser(id, { nome, sobrenome, email, telefone, passwordHash }) {
+    const current = await this.getUserById(id);
+    if (!current) return null;
+
+    const nextNome = nome !== undefined ? String(nome).trim() : current.nome;
+    const nextSobrenome = sobrenome !== undefined ? String(sobrenome).trim() : (current.sobrenome || '');
+    const nextEmail = email !== undefined ? String(email).trim().toLowerCase() : current.email;
+    const nextTelefone = telefone !== undefined ? String(telefone).trim() : (current.telefone || '');
+    const nextPasswordHash = passwordHash || current.passwordHash;
+    const ts = now();
+
+    if (nextEmail !== current.email) {
+      const other = await this.getUserByEmail(nextEmail);
+      if (other && other.id !== id) {
+        const err = new Error('Este e-mail já está em uso por outra conta.');
+        err.status = 409;
+        throw err;
+      }
+    }
+
+    if (isPostgresConfigured()) {
+      await ensureSchema();
+      const sql = getSql();
+      const rows = await sql`
+        UPDATE users
+        SET nome = ${nextNome},
+            sobrenome = ${nextSobrenome},
+            email = ${nextEmail},
+            telefone = ${nextTelefone},
+            password_hash = ${nextPasswordHash},
+            updated_at = ${ts}
+        WHERE id = ${id}
+        RETURNING *
+      `;
+      return formatUserRow(rows[0]);
+    }
+
+    const s = loadLocal();
+    const idx = s.users.findIndex((u) => u.id === id);
+    if (idx === -1) return null;
+    s.users[idx] = {
+      ...s.users[idx],
+      nome: nextNome,
+      sobrenome: nextSobrenome,
+      email: nextEmail,
+      telefone: nextTelefone,
+      passwordHash: nextPasswordHash,
+      updatedAt: ts,
+    };
+    await persistLocal();
+    return s.users[idx];
   },
 
   async getUserByEmail(email) {
@@ -329,6 +388,7 @@ export const db = {
         INSERT INTO notificacoes (id, user_id, concurso_id, lida, data, created_at)
         VALUES (${id}, ${userId}, ${item.concursoId || null}, ${Boolean(item.lida)}, ${JSON.stringify(item)}::jsonb, ${createdAt})
       `;
+      await notifyUserTelegram(this, userId, item);
       return item;
     }
 
@@ -336,6 +396,7 @@ export const db = {
     s.notificacoes.unshift(item);
     s.notificacoes = s.notificacoes.slice(0, 500);
     await persistLocal();
+    await notifyUserTelegram(this, userId, item);
     return item;
   },
 

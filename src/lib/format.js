@@ -106,3 +106,45 @@ export const BANCAS = ['Cebraspe', 'FGV', 'FCC', 'Vunesp', 'Cesgranrio', 'IBFC',
 export const UFS = ['Nacional', 'AC', 'AL', 'AP', 'AM', 'BA', 'CE', 'DF', 'ES', 'GO', 'MA', 'MT', 'MS', 'MG', 'PA', 'PB', 'PR', 'PE', 'PI', 'RJ', 'RN', 'RS', 'RO', 'RR', 'SC', 'SP', 'SE', 'TO'];
 export const TURNOS = ['Manhã', 'Tarde', 'Noite', 'Manhã e Tarde', 'Integral', 'Não informado'];
 export const ESCOLARIDADES = ['Fundamental', 'Médio', 'Técnico', 'Superior', 'Pós-graduação'];
+
+/**
+ * Formata um número de telefone enquanto o usuário digita (padrão internacional / brasileiro +55 (DD) 99999-9999).
+ */
+export function formatPhoneInput(raw = '') {
+  const digits = String(raw || '').replace(/\D/g, '').slice(0, 15);
+  if (!digits) return '';
+  let d = digits;
+  if (d.length <= 11 && !String(raw).trim().startsWith('+')) {
+    d = `55${d}`;
+  }
+  if (d.startsWith('55') && d.length <= 13) {
+    const ddd = d.slice(2, 4);
+    const rest = d.slice(4);
+    if (!ddd) return `+${d}`;
+    if (!rest) return `+55 (${ddd}`;
+    if (rest.length <= 4) return `+55 (${ddd}) ${rest}`;
+    if (rest.length <= 8) return `+55 (${ddd}) ${rest.slice(0, 4)}-${rest.slice(4)}`;
+    return `+55 (${ddd}) ${rest.slice(0, 5)}-${rest.slice(5, 9)}`;
+  }
+  return `+${d}`;
+}
+
+export function toE164Preview(raw = '') {
+  const s = String(raw || '').trim();
+  const hasPlus = s.startsWith('+');
+  const digits = s.replace(/\D/g, '');
+  if (!digits) return '';
+  const full = !hasPlus && (digits.length === 10 || digits.length === 11) ? `55${digits}` : digits;
+  return full.length >= 11 && full.length <= 15 ? `+${full}` : '';
+}
+
+export function checkPasswordRules(password = '') {
+  const s = String(password);
+  return [
+    { key: 'length', ok: s.length >= 8, label: 'Mínimo de 8 caracteres' },
+    { key: 'upper', ok: /[A-ZÁÀÂÃÉÊÍÓÔÕÚÇ]/.test(s), label: 'Pelo menos 1 letra maiúscula (A–Z)' },
+    { key: 'lower', ok: /[a-záàâãéêíóôõúç]/.test(s), label: 'Pelo menos 1 letra minúscula (a–z)' },
+    { key: 'digit', ok: /\d/.test(s), label: 'Pelo menos 1 número (0–9)' },
+    { key: 'special', ok: /[^A-Za-z0-9ÁÀÂÃÉÊÍÓÔÕÚÇáàâãéêíóôõúç\s]/.test(s), label: 'Pelo menos 1 caractere especial (!@#$%...)' },
+  ];
+}

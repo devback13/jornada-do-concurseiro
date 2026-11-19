@@ -25,6 +25,7 @@ import {
   DEFAULT_MODEL,
 } from './ai.js';
 import { checkConcurso, runAll, startScheduler, isRunning, DEFAULT_HORARIOS } from './monitor.js';
+import { normalizePhone, getTelegramStatus, syncTelegramChat, sendTelegramTest } from './telegram.js';
 
 const app = express();
 const PORT = Number(process.env.PORT || 5174);
@@ -47,6 +48,7 @@ function publicUser(u) {
     nome: u.nome,
     sobrenome: u.sobrenome || '',
     email: u.email,
+    telefone: u.telefone || '',
     createdAt: u.createdAt,
   };
 }
@@ -74,6 +76,7 @@ app.post('/api/auth/register', wrap(async (req, res) => {
   const nome = String(req.body?.nome || '').trim();
   const sobrenome = String(req.body?.sobrenome || '').trim();
   const email = String(req.body?.email || '').trim().toLowerCase();
+  const telefone = normalizePhone(req.body?.telefone || '');
   const password = String(req.body?.password || '');
 
   if (!nome) throw Object.assign(new Error('Informe o seu nome.'), { status: 400 });
@@ -92,10 +95,41 @@ app.post('/api/auth/register', wrap(async (req, res) => {
   }
 
   const passwordHash = await hashPassword(password);
-  const user = await db.createUser({ nome, sobrenome, email, passwordHash });
+  const user = await db.createUser({ nome, sobrenome, email, telefone, passwordHash });
   const token = signSessionToken(user);
   setSessionCookie(res, token);
   res.status(201).json({ user: publicUser(user), token });
+}));
+
+app.put('/api/auth/profile', requireAuth, wrap(async (req, res) => {
+  const nome = req.body?.nome !== undefined ? String(req.body.nome).trim() : req.user.nome;
+  const sobrenome = req.body?.sobrenome !== undefined ? String(req.body.sobrenome).trim() : (req.user.sobrenome || '');
+  const email = req.body?.email !== undefined ? String(req.body.email).trim().toLowerCase() : req.user.email;
+  const telefone = req.body?.telefone !== undefined ? normalizePhone(req.body.telefone) : (req.user.telefone || '');
+  const newPassword = String(req.body?.newPassword || '');
+  const currentPassword = String(req.body?.currentPassword || '');
+
+  if (!nome) throw Object.assign(new Error('Informe o seu nome.'), { status: 400 });
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw Object.assign(new Error('Informe um endereço de e-mail válido.'), { status: 400 });
+  }
+
+  let passwordHash;
+  if (newPassword) {
+    if (!currentPassword || !(await verifyPassword(currentPassword, req.user.passwordHash))) {
+      throw Object.assign(new Error('A senha atual informada está incorreta.'), { status: 400 });
+    }
+    const strength = validatePasswordStrength(newPassword);
+    if (!strength.valid) {
+      throw Object.assign(new Error(strength.message), { status: 400 });
+    }
+    passwordHash = await hashPassword(newPassword);
+  }
+
+  const updated = await db.updateUser(req.user.id, { nome, sobrenome, email, telefone, passwordHash });
+  const token = signSessionToken(updated);
+  setSessionCookie(res, token);
+  res.json({ user: publicUser(updated), token });
 }));
 
 app.post('/api/auth/login', wrap(async (req, res) => {
@@ -302,6 +336,7 @@ async function publicSettings(userId) {
     aiProviderShortLabel: activeEntry.shortLabel,
     iaDisponivel: Boolean(activeEntry.apiKey),
     providers: publicProviders,
+    telegram: await getTelegramStatus(db, userId),
     // Campos legados mantidos por compatibilidade
     chaveOrigem: activeEntry.source,
     chaveMascarada: maskKey(activeEntry.apiKey),
@@ -329,13 +364,37 @@ app.put('/api/config', requireAuth, wrap(async (req, res) => {
     if (typeof b[settingsKey] === 'string') patch[settingsKey] = b[settingsKey].trim();
     if (typeof b[settingsModel] === 'string') patch[settingsModel] = b[settingsModel].trim();
   }
+  if (typeof b.telegramBotToken === 'string') {
+    patch.telegramBotToken = b.telegramBotToken.trim();
+    if (!patch.telegramBotToken) {
+      patch.telegramBotUsername = '';
+      patch.telegramChatId = '';
+      patch.telegramChatName = '';
+    }
+  }
+  if (typeof b.telegramChatId === 'string') patch.telegramChatId = b.telegramChatId.trim();
+  if (typeof b.telegramAtivo === 'boolean') patch.telegramAtivo = b.telegramAtivo;
   if (Array.isArray(b.monitorHorarios)) {
     const valid = [...new Set(b.monitorHorarios.filter((h) => /^([01]\d|2[0-3]):[0-5]\d$/.test(h)))].sort();
     if (!valid.length) throw Object.assign(new Error('Informe ao menos um horário válido (HH:MM).'), { status: 400 });
     patch.monitorHorarios = valid;
   }
   await db.updateSettings(req.user.id, patch);
+  if (patch.telegramBotToken) {
+    await syncTelegramChat(db, req.user.id).catch(() => {});
+  }
   res.json(await publicSettings(req.user.id));
+}));
+
+// ----------------------------- Telegram -----------------------------
+app.post('/api/telegram/vincular', requireAuth, wrap(async (req, res) => {
+  const telegram = await syncTelegramChat(db, req.user.id);
+  res.json({ telegram, settings: await publicSettings(req.user.id) });
+}));
+
+app.post('/api/telegram/testar', requireAuth, wrap(async (req, res) => {
+  const r = await sendTelegramTest(db, req.user.id);
+  res.json({ ...r, settings: await publicSettings(req.user.id) });
 }));
 
 // ----------------------------- Backup -----------------------------
