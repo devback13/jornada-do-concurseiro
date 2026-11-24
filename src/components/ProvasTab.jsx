@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Trash2, ClipboardList, ChevronUp, ChevronDown, Settings2, BookOpen, CheckSquare, UserCheck, Trophy, ClipboardPaste, Eraser, Copy, Loader2, Check, AlertTriangle, Info, UploadCloud, Sparkles, FileText, Image as ImageIcon } from 'lucide-react';
+import { Plus, Trash2, ClipboardList, ChevronUp, ChevronDown, Settings2, BookOpen, CheckSquare, UserCheck, Trophy, ClipboardPaste, Eraser, Copy, CopyPlus, Loader2, Check, AlertTriangle, Info, UploadCloud, Sparkles, FileText, Image as ImageIcon } from 'lucide-react';
 import { calcular, totalQuestoes, pontuacaoMaxima, faixas, parseGabarito, gabaritoToString } from '../lib/scoring.js';
 import { api, fileToBase64 } from '../lib/api.js';
 import { useConfig } from '../lib/configContext.js';
@@ -7,7 +7,7 @@ import { Field, Segmented, Ring, EmptyState, ConfirmDialog, useDebouncedCallback
 import AnswerGrid from './AnswerGrid.jsx';
 
 const novaProva = (n, cargo = '') => ({
-  id: `tmp-${Date.now()}`,
+  id: `tmp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
   nome: `Prova objetiva${n > 0 ? ` ${n + 1}` : ''}`,
   cargo,
   tipoQuestao: 'multipla',
@@ -21,6 +21,27 @@ const novaProva = (n, cargo = '') => ({
   gabaritoOficial: [],
   gabaritoUsuario: [],
 });
+
+const clonarProva = (origem, existentes = []) => {
+  const baseNome = String(origem.nome || 'Prova objetiva')
+    .replace(/\s*\(cópia(?:\s+\d+)?\)\s*$/i, '')
+    .trim() || 'Prova objetiva';
+  const nomesUsados = new Set(existentes.map((p) => String(p.nome || '').trim().toLowerCase()));
+  let novoNome = `${baseNome} (cópia)`;
+  let n = 2;
+  while (nomesUsados.has(novoNome.toLowerCase())) {
+    novoNome = `${baseNome} (cópia ${n})`;
+    n += 1;
+  }
+  return {
+    ...origem,
+    id: `tmp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    nome: novoNome,
+    disciplinas: (origem.disciplinas || []).map((d) => ({ ...d })),
+    gabaritoOficial: Array.isArray(origem.gabaritoOficial) ? [...origem.gabaritoOficial] : [],
+    gabaritoUsuario: Array.isArray(origem.gabaritoUsuario) ? [...origem.gabaritoUsuario] : [],
+  };
+};
 
 const fmtN = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(2).replace('.', ','));
 const pct = (v) => `${(v * 100).toFixed(1).replace('.', ',')}%`;
@@ -274,7 +295,7 @@ function Resultado({ prova }) {
   );
 }
 
-function ProvaEditor({ prova, onChange, onDelete, cargos }) {
+function ProvaEditor({ prova, onChange, onClone, onDelete, cargos }) {
   const [modo, setModo] = useState('usuario');
   const [mostrarCorrecao, setMostrarCorrecao] = useState(true);
   const toast = useToast();
@@ -293,7 +314,14 @@ function ProvaEditor({ prova, onChange, onDelete, cargos }) {
     <div className="prova-editor">
       <section className="card">
         <h3 className="block-title"><Settings2 size={18} /> Configuração da prova
-          <button type="button" className="btn btn-ghost btn-sm danger push" onClick={onDelete}><Trash2 size={15} /> Excluir prova</button>
+          <div className="row gap-sm wrap push">
+            <button type="button" className="btn btn-outline btn-sm" onClick={onClone} title="Criar uma cópia desta prova com disciplinas, pesos e gabaritos">
+              <CopyPlus size={15} /> Clonar prova
+            </button>
+            <button type="button" className="btn btn-ghost btn-sm danger" onClick={onDelete}>
+              <Trash2 size={15} /> Excluir prova
+            </button>
+          </div>
         </h3>
         <div className="grid-form">
           <Field label="Nome da prova" className="span-2"><input value={prova.nome} onChange={(e) => set({ nome: e.target.value })} /></Field>
@@ -358,6 +386,7 @@ export default function ProvasTab({ concurso, onSave }) {
   const [sel, setSel] = useState(0);
   const [saveState, setSaveState] = useState('saved');
   const [confirm, setConfirm] = useState(null);
+  const toast = useToast();
   const cargos = (concurso.cargos || []).map((c) => c.nome).filter(Boolean);
 
   useEffect(() => { setProvas(concurso.provas || []); setSel(0); }, [concurso.id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -377,6 +406,17 @@ export default function ProvasTab({ concurso, onSave }) {
     const list = [...provas, novaProva(provas.length, concurso.cargoInteresse || cargos[0] || '')];
     commit(list);
     setSel(list.length - 1);
+  };
+
+  const clone = (sourceIdx) => {
+    const origem = provas[sourceIdx];
+    if (!origem) return;
+    const clonada = clonarProva(origem, provas);
+    const nextIdx = sourceIdx + 1;
+    const list = [...provas.slice(0, nextIdx), clonada, ...provas.slice(nextIdx)];
+    commit(list);
+    setSel(nextIdx);
+    toast(`Prova "${clonada.nome}" clonada com sucesso.`);
   };
 
   if (!provas.length) {
@@ -404,7 +444,10 @@ export default function ProvasTab({ concurso, onSave }) {
               </button>
             );
           })}
-          <button className="prova-pill add" onClick={add}><Plus size={16} /> Nova prova</button>
+          <button type="button" className="prova-pill clone" onClick={() => clone(idx)} title="Criar uma cópia da prova selecionada">
+            <CopyPlus size={16} /> Clonar prova
+          </button>
+          <button type="button" className="prova-pill add" onClick={add}><Plus size={16} /> Nova prova</button>
         </div>
         <span className={`save-indicator ${saveState}`} aria-live="polite">
           {saveState === 'saving' || saveState === 'pending' ? <><Loader2 size={14} className="spin" /> Salvando…</> : saveState === 'error' ? <><AlertTriangle size={14} /> Erro ao salvar</> : <><Check size={14} /> Salvo</>}
@@ -413,6 +456,7 @@ export default function ProvasTab({ concurso, onSave }) {
 
       <ProvaEditor key={atual.id || idx} prova={atual} cargos={cargos}
         onChange={(p) => commit(provas.map((x, i) => (i === idx ? p : x)))}
+        onClone={() => clone(idx)}
         onDelete={() => setConfirm(idx)} />
 
       <ConfirmDialog open={confirm !== null} danger title="Excluir prova?" confirmLabel="Excluir"

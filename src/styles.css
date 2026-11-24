@@ -512,7 +512,9 @@ input, select, textarea { font: inherit; color: inherit; }
 .prova-pill:hover { border-color: var(--border-strong); }
 .prova-pill.active { border-color: var(--primary); background: var(--primary-soft); box-shadow: 0 0 0 1px var(--primary); }
 .prova-pill.active strong { color: var(--primary-text); }
-.prova-pill.add { flex-direction: row; align-items: center; gap: .35rem; border-style: dashed; color: var(--primary); font-weight: 600; font-size: .88rem; }
+.prova-pill.add, .prova-pill.clone { flex-direction: row; align-items: center; gap: .35rem; border-style: dashed; color: var(--primary); font-weight: 600; font-size: .88rem; }
+.prova-pill.clone { color: var(--text-2); }
+.prova-pill.clone:hover { color: var(--primary); border-color: var(--primary); }
 .save-indicator { display: inline-flex; align-items: center; gap: .35rem; font-size: .8rem; font-weight: 600; color: var(--text-3); }
 .save-indicator.saved { color: var(--success); }
 .save-indicator.error { color: var(--danger); }
